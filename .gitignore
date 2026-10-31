@@ -361,3 +361,11 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+
+# Local ProxyNetworker runtime data and secrets
+ProxyNetworker.Server/*.db
+ProxyNetworker.Server/*.db-shm
+ProxyNetworker.Server/*.db-wal
+ProxyNetworker.Server/*.db-journal
+ProxyNetworker.Server/data-protection-keys/
+/.temp
