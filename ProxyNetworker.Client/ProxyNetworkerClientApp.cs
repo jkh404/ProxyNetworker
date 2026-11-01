@@ -1,5 +1,4 @@
 using System.Net;
-using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using ProxyNetworker.Core;
 using ProxyNetworker.Core.Platforms.Linux;
@@ -74,6 +73,17 @@ internal static class ProxyNetworkerClientApp
             return await RunAuthCommandAsync(commandLine).ConfigureAwait(false);
         }
 
+        if (commandLine.CommandIs("crypto"))
+        {
+            if (!commandLine.SubCommandIs("self-test"))
+            {
+                PrintUsage();
+                return 2;
+            }
+
+            return RunCryptoSelfTest();
+        }
+
         if (commandLine.CommandIs("port-tunnel"))
         {
             return await RunPortTunnelCommandAsync(commandLine).ConfigureAwait(false);
@@ -85,6 +95,47 @@ internal static class ProxyNetworkerClientApp
         }
 
         return await RunVirtualNetworkDirectAsync(commandLine, serverArgumentIndex: 0).ConfigureAwait(false);
+    }
+
+    private static int RunCryptoSelfTest()
+    {
+        var key = Convert.FromHexString("000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F");
+        var nonce = Convert.FromHexString("000102030405060708090A0B");
+        var associatedData = Convert.FromHexString("FEEDFACEDEADBEEF");
+        var plaintext = "ProxyNetworker standard GCM vector"u8;
+        var expectedCiphertext = Convert.FromHexString(
+            "1770B963BCABA76FFA2EE5E0D49B581EF7B7E95091093B5C7F24A8A56B0C63C66E62");
+        var expectedTag = Convert.FromHexString("1501BC0200F6AA09590E9753E14B5A09");
+        var selectedCiphertext = new byte[plaintext.Length];
+        var selectedTag = new byte[VirtualNetworkAead.TagSize];
+        var managedCiphertext = new byte[plaintext.Length];
+        var managedTag = new byte[VirtualNetworkAead.TagSize];
+        var decrypted = new byte[plaintext.Length];
+
+        VirtualNetworkAead.Encrypt(key, nonce, plaintext, selectedCiphertext, selectedTag, associatedData);
+        VirtualNetworkAead.EncryptManaged(key, nonce, plaintext, managedCiphertext, managedTag, associatedData);
+        var decryptedOk = VirtualNetworkAead.TryDecrypt(
+            key,
+            nonce,
+            expectedCiphertext,
+            expectedTag,
+            decrypted,
+            associatedData);
+
+        if (!selectedCiphertext.AsSpan().SequenceEqual(expectedCiphertext) ||
+            !selectedTag.AsSpan().SequenceEqual(expectedTag) ||
+            !managedCiphertext.AsSpan().SequenceEqual(expectedCiphertext) ||
+            !managedTag.AsSpan().SequenceEqual(expectedTag) ||
+            !decryptedOk ||
+            !decrypted.AsSpan().SequenceEqual(plaintext))
+        {
+            Console.Error.WriteLine("AES-GCM self-test: FAIL");
+            return 1;
+        }
+
+        Console.WriteLine("AES-GCM self-test: PASS");
+        Console.WriteLine($"Backend: {VirtualNetworkAead.BackendName}");
+        return 0;
     }
 
     private static async Task<int> RunPortTunnelCommandAsync(CommandLine commandLine)
@@ -199,6 +250,7 @@ internal static class ProxyNetworkerClientApp
         var mtu = commandLine.IntOption("mtu", 1400);
         var transportProtocol = VirtualNetworkTransportProtocols.Normalize(
             commandLine.Option("transport") ?? Environment.GetEnvironmentVariable("PN_TRANSPORT") ?? VirtualNetworkTransportProtocols.Udp);
+        var encryptionEnabled = !commandLine.IsFlagEnabled("no-encryption");
         var tokenType = commandLine.Option("token-type") ?? "Permanent";
         var validFrom = ParseOptionalDateTimeOffset(commandLine.Option("valid-from"), "--valid-from");
         var validUntil = ParseOptionalDateTimeOffset(commandLine.Option("valid-until"), "--valid-until");
@@ -213,6 +265,7 @@ internal static class ProxyNetworkerClientApp
             listenPort,
             mtu,
             transportProtocol,
+            encryptionEnabled,
             shutdown.Token).ConfigureAwait(false);
         var token = await api.CreateVirtualNetworkTokenAsync(
             definition.Id,
@@ -260,6 +313,12 @@ internal static class ProxyNetworkerClientApp
 
     private static async Task<int> RunRemotePortTunnelAsync(string server, string token)
     {
+        using var instanceLock = TryAcquireTokenLock(token, "Port Tunnel");
+        if (instanceLock is null)
+        {
+            return 2;
+        }
+
         var endpoint = BuildPortTunnelWebSocketEndpoint(server);
 
         using var shutdown = CreateShutdownSource();
@@ -273,11 +332,16 @@ internal static class ProxyNetworkerClientApp
 
     private static async Task<int> RunVirtualNetworkTokenAsync(string server, string token, string? name, bool relayOnly)
     {
+        using var instanceLock = TryAcquireTokenLock(token, "Virtual Network");
+        if (instanceLock is null)
+        {
+            return 2;
+        }
+
         using var shutdown = CreateShutdownSource();
-        using var runtime = await StartVirtualNetworkTokenAsync(server, token, name, relayOnly, shutdown.Token).ConfigureAwait(false);
         Console.WriteLine("Press Ctrl+C to stop.");
 
-        await WaitUntilCancelledAsync(shutdown.Token).ConfigureAwait(false);
+        await RunVirtualNetworkTokenRuntimeAsync(server, token, name, relayOnly, shutdown.Token).ConfigureAwait(false);
         return 0;
     }
 
@@ -332,6 +396,7 @@ internal static class ProxyNetworkerClientApp
             PrefixLength = commandLine.IntOption("prefix", 24),
             Mtu = commandLine.IntOption("mtu", 1400),
             TransportProtocol = VirtualNetworkTransportProtocols.Normalize(commandLine.Option("transport") ?? Environment.GetEnvironmentVariable("PN_TRANSPORT")),
+            EncryptionEnabled = !commandLine.IsFlagEnabled("no-encryption"),
             AuthenticationKey = ParseAuthenticationKey(commandLine.Option("auth-key", "PN_AUTH_KEY")),
             RelayOnly = IsRelayOnly(commandLine)
         };
@@ -383,6 +448,13 @@ internal static class ProxyNetworkerClientApp
                     continue;
                 }
 
+                var instanceLock = TryAcquireTokenLock(item.Token, "Port Tunnel");
+                if (instanceLock is null)
+                {
+                    continue;
+                }
+                disposables.Add(instanceLock);
+
                 var endpoint = BuildPortTunnelWebSocketEndpoint(server);
                 var client = new RemotePortTunnelClient(endpoint, item.Token, entry => WriteNamedLog(item.Name ?? item.Token[..Math.Min(item.Token.Length, 8)], entry));
                 disposables.Add(client);
@@ -411,9 +483,13 @@ internal static class ProxyNetworkerClientApp
                         }
                         else
                         {
-                            Console.WriteLine($"Starting Virtual Network '{virtualNetwork.Name}' by token from {server}.");
-                            disposables.Add(await StartVirtualNetworkTokenAsync(server, virtualNetwork.Token, virtualNetwork.Name, virtualNetwork.RelayOnly, shutdown.Token).ConfigureAwait(false));
-                            tasks.Add(WaitUntilCancelledAsync(shutdown.Token));
+                            var instanceLock = TryAcquireTokenLock(virtualNetwork.Token, "Virtual Network");
+                            if (instanceLock is not null)
+                            {
+                                disposables.Add(instanceLock);
+                                Console.WriteLine($"Starting Virtual Network '{virtualNetwork.Name}' by token from {server}.");
+                                tasks.Add(RunVirtualNetworkTokenRuntimeAsync(server, virtualNetwork.Token, virtualNetwork.Name, virtualNetwork.RelayOnly, shutdown.Token));
+                            }
                         }
                     }
                 }
@@ -485,17 +561,16 @@ internal static class ProxyNetworkerClientApp
         return token.Contains("replace_this_token", StringComparison.OrdinalIgnoreCase);
     }
 
-    private static bool IsLocalEndPoint(IPEndPoint endPoint)
+    private static TokenSingleInstanceLock? TryAcquireTokenLock(string token, string operation)
     {
-        if (IPAddress.IsLoopback(endPoint.Address))
+        var instanceLock = TokenSingleInstanceLock.TryAcquire(token);
+        if (instanceLock is null)
         {
-            return true;
+            Console.Error.WriteLine(
+                $"{operation} token is already running on this computer. Stop the existing client process before starting another instance.");
         }
 
-        return NetworkInterface.GetAllNetworkInterfaces()
-            .Where(static networkInterface => networkInterface.OperationalStatus == OperationalStatus.Up)
-            .SelectMany(static networkInterface => networkInterface.GetIPProperties().UnicastAddresses)
-            .Any(unicast => unicast.Address.Equals(endPoint.Address));
+        return instanceLock;
     }
 
     private static async Task<IDisposable> StartVirtualNetworkDirectAsync(DirectVirtualNetworkClientConfig config, CancellationToken cancellationToken)
@@ -523,14 +598,9 @@ internal static class ProxyNetworkerClientApp
                 PrefixLength = config.PrefixLength,
                 NodeName = string.IsNullOrWhiteSpace(config.NodeDisplayName) ? config.Name : config.NodeDisplayName,
                 AuthenticationKey = config.AuthenticationKey,
-                EnableDirectPaths = !config.RelayOnly && !IsLocalEndPoint(remoteEndPoint)
+                EncryptionEnabled = config.EncryptionEnabled,
+                EnableDirectPaths = !config.RelayOnly
             };
-            if (!config.RelayOnly && !options.EnableDirectPaths)
-            {
-                WriteLog(new ProxyNetworkerLogEntry(
-                    ProxyNetworkerLogLevel.Information,
-                    $"Virtual Network server endpoint {remoteEndPoint} is local; using relay-only mode to avoid NAT hairpin routing."));
-            }
             IDisposable tunnel = VirtualNetworkTransportProtocols.UsesReliableStream(config.TransportProtocol)
                 ? new VirtualNetworkStreamTunnel(tunDevice, options, config.TransportProtocol, WriteLog)
                 : new VirtualNetworkTunnel(tunDevice, options, WriteLog);
@@ -543,7 +613,7 @@ internal static class ProxyNetworkerClientApp
             {
                 await ((VirtualNetworkTunnel)tunnel).StartAsync(cancellationToken).ConfigureAwait(false);
             }
-            Console.WriteLine($"ProxyNetworker Virtual Network client started. TUN={config.Name} {tunAddress}/{config.PrefixLength}, peer={remoteEndPoint}.");
+            Console.WriteLine($"ProxyNetworker Virtual Network client started. TUN={config.Name} {tunAddress}/{config.PrefixLength}, peer={remoteEndPoint}, encryption={(config.EncryptionEnabled ? "AES-GCM" : "HMAC-only")}.");
             return tunnel;
         }
         catch
@@ -553,7 +623,7 @@ internal static class ProxyNetworkerClientApp
         }
     }
 
-    private static async Task<IDisposable> StartVirtualNetworkTokenAsync(
+    private static async Task RunVirtualNetworkTokenRuntimeAsync(
         string server,
         string token,
         string? name,
@@ -561,7 +631,63 @@ internal static class ProxyNetworkerClientApp
         CancellationToken cancellationToken)
     {
         using var api = new ManagementApiClient(server);
-        var remoteConfig = await api.GetVirtualNetworkConfigAsync(token, cancellationToken).ConfigureAwait(false);
+        var retryDelay = TimeSpan.FromSeconds(2);
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                var remoteConfig = await api.GetVirtualNetworkConfigAsync(token, cancellationToken).ConfigureAwait(false);
+                var fingerprint = CreateVirtualNetworkConfigFingerprint(remoteConfig, server);
+                using var runtime = await StartVirtualNetworkTokenRuntimeAsync(
+                    server,
+                    remoteConfig,
+                    name,
+                    relayOnly,
+                    cancellationToken).ConfigureAwait(false);
+                retryDelay = TimeSpan.FromSeconds(2);
+
+                while (!cancellationToken.IsCancellationRequested)
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(5), cancellationToken).ConfigureAwait(false);
+                    try
+                    {
+                        var latestConfig = await api.GetVirtualNetworkConfigAsync(token, cancellationToken).ConfigureAwait(false);
+                        if (!string.Equals(fingerprint, CreateVirtualNetworkConfigFingerprint(latestConfig, server), StringComparison.Ordinal))
+                        {
+                            Log.Information("Virtual Network token configuration changed; reconnecting with the new session key.");
+                            break;
+                        }
+                    }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                    {
+                        return;
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Debug(ex, "Virtual Network token configuration refresh failed; keeping the current runtime.");
+                    }
+                }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, "Virtual Network token runtime failed; retrying in {DelaySeconds}s.", retryDelay.TotalSeconds);
+                await Task.Delay(retryDelay, cancellationToken).ConfigureAwait(false);
+                retryDelay = TimeSpan.FromSeconds(Math.Min(retryDelay.TotalSeconds * 2, 30));
+            }
+        }
+    }
+
+    private static async Task<IDisposable> StartVirtualNetworkTokenRuntimeAsync(
+        string server,
+        VirtualNetworkClientConfigResponse remoteConfig,
+        string? name,
+        bool relayOnly,
+        CancellationToken cancellationToken)
+    {
         var displayName = string.IsNullOrWhiteSpace(name)
             ? CreateClientTunName(remoteConfig.NetworkId)
             : name;
@@ -592,7 +718,8 @@ internal static class ProxyNetworkerClientApp
             throw new InvalidOperationException("Virtual Network server returned an invalid authentication key length.");
         }
 
-        Console.WriteLine($"Virtual Network token accepted. network={remoteConfig.Name}, transport={remoteConfig.TransportProtocol}, assigned={remoteConfig.ClientAddress}/{remoteConfig.PrefixLength}, server={serverHost}:{remoteConfig.ServerPort}.");
+        var encryptionEnabled = remoteConfig.EncryptionEnabled ?? true;
+        Console.WriteLine($"Virtual Network token accepted. network={remoteConfig.Name}, transport={remoteConfig.TransportProtocol}, encryption={(encryptionEnabled ? "AES-GCM" : "HMAC-only")}, assigned={remoteConfig.ClientAddress}/{remoteConfig.PrefixLength}, server={serverHost}:{remoteConfig.ServerPort}.");
 
         return await StartVirtualNetworkDirectAsync(new DirectVirtualNetworkClientConfig
         {
@@ -606,8 +733,24 @@ internal static class ProxyNetworkerClientApp
             Mtu = remoteConfig.Mtu,
             AuthenticationKey = authenticationKey,
             TransportProtocol = remoteConfig.TransportProtocol,
+            EncryptionEnabled = encryptionEnabled,
             RelayOnly = relayOnly
         }, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static string CreateVirtualNetworkConfigFingerprint(VirtualNetworkClientConfigResponse config, string server)
+    {
+        return string.Join('|',
+            config.NetworkId,
+            config.Name,
+            NormalizeHost(config.ServerHost, server),
+            config.ServerPort,
+            config.ClientAddress,
+            config.PrefixLength,
+            config.Mtu,
+            config.TransportProtocol,
+            config.EncryptionEnabled ?? true,
+            config.AuthenticationKey);
     }
 
     private static string CreateClientTunName(string networkId)
@@ -884,6 +1027,7 @@ internal static class ProxyNetworkerClientApp
         Console.WriteLine($"  {executableName} virtual-network create --server http://server:13301 --username sky [--gateway 10.66.0.1] [--prefix 24] [--run]");
         Console.WriteLine($"  {executableName} virtual-network --server http://server:13301 --token vnet_xxx [--name pn-client] [--relay-only]");
         Console.WriteLine($"  {executableName} virtual-network --server <host> [--port 51820] [--tun-address 10.66.0.2] [--prefix 24] [--name pn-client]");
+        Console.WriteLine($"  {executableName} crypto self-test");
         Console.WriteLine($"  {executableName} auth change-password --server http://server:13301 --username sky [--password current] [--new-password next]");
         Console.WriteLine();
         Console.WriteLine("Environment fallbacks: PN_SERVER, PN_TOKEN, PN_USERNAME, PN_PASSWORD.");

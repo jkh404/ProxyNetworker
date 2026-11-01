@@ -160,6 +160,10 @@ jobs:
           Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $archive -CompressionLevel Optimal
           Get-Item -LiteralPath $archive | Select-Object FullName, Length
 
+      - name: Verify AEAD standard vector
+        shell: pwsh
+        run: '& "$env:GITHUB_WORKSPACE\dist\client-win-x64\ProxyNetworker.Client.exe" crypto self-test'
+
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
@@ -203,6 +207,18 @@ jobs:
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
+      - name: Prepare Linux x64 QUIC compatibility
+        if: matrix.rid == 'linux-x64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .build/openssl11
+          docker run --rm -v "$PWD/.build/openssl11:/out" ubuntu:20.04 bash -c '
+            apt-get update
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libssl1.1
+            cp /usr/lib/x86_64-linux-gnu/libcrypto.so.1.1 /out/
+          '
+
       - name: Restore
         shell: bash
         run: dotnet restore ProxyNetworker.Client/ProxyNetworker.Client.csproj -r "${{ matrix.rid }}" -p:Version="$VERSION"
@@ -221,6 +237,17 @@ jobs:
             -p:DebugType=None \
             -p:DebugSymbols=false \
             -o "dist/client-${{ matrix.rid }}"
+
+      - name: Stage Linux x64 QUIC compatibility
+        if: matrix.rid == 'linux-x64'
+        shell: bash
+        run: cp .build/openssl11/libcrypto.so.1.1 "dist/client-${{ matrix.rid }}/"
+
+      - name: Verify AEAD standard vector
+        shell: bash
+        run: |
+          chmod +x "dist/client-${{ matrix.rid }}/ProxyNetworker.Client"
+          "dist/client-${{ matrix.rid }}/ProxyNetworker.Client" crypto self-test
 
       - name: Package
         shell: bash
@@ -241,6 +268,7 @@ jobs:
           test -f "$stage/appsettings.json"
           if [[ "$RID" == "linux-x64" ]]; then
             test -f "$stage/libmsquic.so.2"
+            test -f "$stage/libcrypto.so.1.1"
           fi
 
           archive="artifacts/ProxyNetworker.Client_${RID}_${TAG}.tar.gz"
@@ -282,6 +310,17 @@ jobs:
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
+      - name: Prepare Linux x64 QUIC compatibility
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .build/openssl11
+          docker run --rm -v "$PWD/.build/openssl11:/out" ubuntu:20.04 bash -c '
+            apt-get update
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libssl1.1
+            cp /usr/lib/x86_64-linux-gnu/libcrypto.so.1.1 /out/
+          '
+
       - name: Restore
         shell: bash
         run: dotnet restore ProxyNetworker.Server/ProxyNetworker.Server.csproj -r linux-x64 -p:Version="$VERSION"
@@ -299,6 +338,10 @@ jobs:
             -p:DebugType=None \
             -p:DebugSymbols=false \
             -o dist/server-linux-x64
+
+      - name: Stage Linux x64 QUIC compatibility
+        shell: bash
+        run: cp .build/openssl11/libcrypto.so.1.1 dist/server-linux-x64/
 
       - name: Package
         shell: bash
@@ -323,6 +366,7 @@ jobs:
           test -f "$stage/appsettings.json"
           test -f "$stage/wwwroot/index.html"
           test -f "$stage/libmsquic.so.2"
+          test -f "$stage/libcrypto.so.1.1"
           test -L "$stage/libmsquic.so"
           test -f "$stage/libnuma.so.1"
 

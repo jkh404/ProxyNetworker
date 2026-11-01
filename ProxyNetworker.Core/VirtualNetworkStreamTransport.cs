@@ -129,7 +129,7 @@ public sealed class VirtualNetworkStreamTunnel : IDisposable
                     return;
                 }
 
-                if (VirtualNetworkFrame.TryParse(message, _options.AuthenticationKey, out var frame) &&
+                if (VirtualNetworkFrame.TryParse(message, _options.AuthenticationKey, _options.EncryptionEnabled, out var frame) &&
                     frame.Type == VirtualNetworkFrameType.Packet)
                 {
                     await _tunDevice.SendAsync(frame.Payload, cancellationToken).ConfigureAwait(false);
@@ -175,7 +175,7 @@ public sealed class VirtualNetworkStreamTunnel : IDisposable
         var cancellationToken = _runtimeCancellation?.Token ?? CancellationToken.None;
         try
         {
-            var frame = VirtualNetworkFrame.Create(VirtualNetworkFrameType.Packet, _options.NodeAddress, packet.Span, _options.AuthenticationKey);
+            var frame = VirtualNetworkFrame.Create(VirtualNetworkFrameType.Packet, _options.NodeAddress, packet.Span, _options.AuthenticationKey, _options.EncryptionEnabled);
             await SendFrameAsync(frame, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is IOException or ObjectDisposedException or SocketException or QuicException)
@@ -188,7 +188,7 @@ public sealed class VirtualNetworkStreamTunnel : IDisposable
     {
         var nodeName = string.IsNullOrWhiteSpace(_options.NodeName) ? Environment.MachineName : _options.NodeName;
         var payload = VirtualNetworkNodeInfo.FromEnvironment(nodeName).Encode();
-        var frame = VirtualNetworkFrame.Create(type, _options.NodeAddress, payload, _options.AuthenticationKey);
+        var frame = VirtualNetworkFrame.Create(type, _options.NodeAddress, payload, _options.AuthenticationKey, _options.EncryptionEnabled);
         await SendFrameAsync(frame, cancellationToken).ConfigureAwait(false);
     }
 
@@ -278,6 +278,52 @@ public sealed class VirtualNetworkStreamRelay : IVirtualNetworkRelay
     public IReadOnlyList<VirtualNetworkPeerSnapshot> GetPeerSnapshots()
     {
         return _sessions.Values.Select(static session => session.ToSnapshot()).OrderBy(static peer => peer.VirtualAddress.ToString()).ToArray();
+    }
+
+    public VirtualNetworkTopologySnapshot GetTopologySnapshot()
+    {
+        var capturedAt = DateTimeOffset.UtcNow;
+        var serverInfo = VirtualNetworkNodeInfo.FromEnvironment(
+            string.IsNullOrWhiteSpace(_options.NodeName) ? _options.NodeAddress.ToString() : _options.NodeName);
+        var nodes = new List<VirtualNetworkTopologyNodeSnapshot>
+        {
+            new(
+                _options.NodeAddress,
+                "server",
+                serverInfo.NodeName,
+                serverInfo.MachineName,
+                serverInfo.OsDescription,
+                serverInfo.OsArchitecture,
+                serverInfo.ProcessArchitecture,
+                serverInfo.ClientVersion,
+                true,
+                0,
+                0,
+                null,
+                capturedAt)
+        };
+        var edges = new List<VirtualNetworkTopologyEdgeSnapshot>();
+        foreach (var session in _sessions.Values.Distinct())
+        {
+            session.UpdateRates(capturedAt);
+            nodes.Add(session.ToTopologyNode());
+            edges.Add(new VirtualNetworkTopologyEdgeSnapshot(
+                _options.NodeAddress,
+                session.VirtualAddress,
+                VirtualNetworkTopologyConnectionTypes.Relay,
+                _transportProtocol,
+                null,
+                null,
+                null,
+                null,
+                session.BytesSent,
+                session.BytesReceived,
+                session.BytesPerSecondSent,
+                session.BytesPerSecondReceived,
+                session.LastSeenAt));
+        }
+
+        return new VirtualNetworkTopologySnapshot(_transportProtocol, capturedAt, nodes, edges);
     }
 
     public async Task StartAsync(CancellationToken cancellationToken = default)
@@ -422,7 +468,7 @@ public sealed class VirtualNetworkStreamRelay : IVirtualNetworkRelay
                 return;
             }
 
-            if (!VirtualNetworkFrame.TryParse(message, _options.AuthenticationKey, out var frame))
+            if (!VirtualNetworkFrame.TryParse(message, _options.AuthenticationKey, _options.EncryptionEnabled, out var frame))
             {
                 return;
             }
@@ -444,6 +490,7 @@ public sealed class VirtualNetworkStreamRelay : IVirtualNetworkRelay
             _sessions[key] = session;
             if (frame.Type == VirtualNetworkFrameType.Packet)
             {
+                session.RecordReceived(frame.Payload.Length);
                 await RoutePacketAsync(session, frame.Payload, cancellationToken).ConfigureAwait(false);
             }
         }
@@ -474,10 +521,11 @@ public sealed class VirtualNetworkStreamRelay : IVirtualNetworkRelay
             return;
         }
 
-        var frame = VirtualNetworkFrame.Create(VirtualNetworkFrameType.Packet, _options.NodeAddress, packet.Span, _options.AuthenticationKey);
+        var frame = VirtualNetworkFrame.Create(VirtualNetworkFrameType.Packet, _options.NodeAddress, packet.Span, _options.AuthenticationKey, _options.EncryptionEnabled);
         foreach (var session in sessions)
         {
             await session.SendFrameAsync(frame, cancellationToken).ConfigureAwait(false);
+            session.RecordSent(packet.Length);
         }
     }
 
@@ -565,7 +613,15 @@ internal sealed class VirtualNetworkStreamSession : IDisposable
     private readonly Action<VirtualNetworkStreamSession> _remove;
     private readonly Action<ProxyNetworkerLogLevel, string, Exception?> _log;
     private readonly QuicConnection? _quicConnection;
+    private readonly object _rateLock = new();
     private int _disposed;
+    private long _bytesSent;
+    private long _bytesReceived;
+    private long _rateSampleBytesSent;
+    private long _rateSampleBytesReceived;
+    private DateTimeOffset _rateSampleAt = DateTimeOffset.UtcNow;
+    private double _bytesPerSecondSent;
+    private double _bytesPerSecondReceived;
 
     public VirtualNetworkStreamSession(
         string id,
@@ -593,6 +649,10 @@ internal sealed class VirtualNetworkStreamSession : IDisposable
     public VirtualNetworkNodeInfo NodeInfo { get; private set; }
     public DateTimeOffset ConnectedAt { get; } = DateTimeOffset.UtcNow;
     public DateTimeOffset LastSeenAt { get; private set; } = DateTimeOffset.UtcNow;
+    public long BytesSent => Interlocked.Read(ref _bytesSent);
+    public long BytesReceived => Interlocked.Read(ref _bytesReceived);
+    public double BytesPerSecondSent { get { lock (_rateLock) { return _bytesPerSecondSent; } } }
+    public double BytesPerSecondReceived { get { lock (_rateLock) { return _bytesPerSecondReceived; } } }
 
     public void Touch(IPAddress virtualAddress, ReadOnlySpan<byte> nodeInfoPayload)
     {
@@ -618,6 +678,42 @@ internal sealed class VirtualNetworkStreamSession : IDisposable
         }
     }
 
+    public void RecordReceived(int bytes)
+    {
+        if (bytes > 0)
+        {
+            Interlocked.Add(ref _bytesReceived, bytes);
+        }
+    }
+
+    public void RecordSent(int bytes)
+    {
+        if (bytes > 0)
+        {
+            Interlocked.Add(ref _bytesSent, bytes);
+        }
+    }
+
+    public void UpdateRates(DateTimeOffset now)
+    {
+        lock (_rateLock)
+        {
+            var elapsedSeconds = (now - _rateSampleAt).TotalSeconds;
+            if (elapsedSeconds < 0.25)
+            {
+                return;
+            }
+
+            var bytesSent = Interlocked.Read(ref _bytesSent);
+            var bytesReceived = Interlocked.Read(ref _bytesReceived);
+            _bytesPerSecondSent = Math.Max(0, bytesSent - _rateSampleBytesSent) / elapsedSeconds;
+            _bytesPerSecondReceived = Math.Max(0, bytesReceived - _rateSampleBytesReceived) / elapsedSeconds;
+            _rateSampleBytesSent = bytesSent;
+            _rateSampleBytesReceived = bytesReceived;
+            _rateSampleAt = now;
+        }
+    }
+
     public VirtualNetworkPeerSnapshot ToSnapshot()
     {
         return new VirtualNetworkPeerSnapshot(
@@ -630,6 +726,26 @@ internal sealed class VirtualNetworkStreamSession : IDisposable
             NodeInfo.ClientVersion,
             RemoteEndPoint,
             Array.Empty<IPEndPoint>(),
+            BytesSent,
+            BytesReceived,
+            ConnectedAt,
+            LastSeenAt);
+    }
+
+    public VirtualNetworkTopologyNodeSnapshot ToTopologyNode()
+    {
+        return new VirtualNetworkTopologyNodeSnapshot(
+            VirtualAddress,
+            "client",
+            NodeInfo.NodeName,
+            NodeInfo.MachineName,
+            NodeInfo.OsDescription,
+            NodeInfo.OsArchitecture,
+            NodeInfo.ProcessArchitecture,
+            NodeInfo.ClientVersion,
+            true,
+            BytesSent,
+            BytesReceived,
             ConnectedAt,
             LastSeenAt);
     }

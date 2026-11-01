@@ -167,6 +167,8 @@ internal sealed class DirectVirtualNetworkClientConfig
 
     public string TransportProtocol { get; set; } = "udp";
 
+    public bool EncryptionEnabled { get; set; } = true;
+
     public byte[] AuthenticationKey { get; set; } = Array.Empty<byte>();
 
     public bool RelayOnly { get; set; }

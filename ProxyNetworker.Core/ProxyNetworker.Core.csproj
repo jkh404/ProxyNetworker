@@ -9,6 +9,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="BouncyCastle.Cryptography" Version="2.7.0" />
     <PackageReference Include="Microsoft.Native.Quic.MsQuic.OpenSSL" Version="2.6.3" />
     <PackageReference Include="Microsoft.Native.Quic.MsQuic.Schannel" Version="2.6.3" />
     <PackageReference Include="StirlingLabs.MsQuic.Bindings.runtime.linux-x64.openssl" Version="2.2.2" />
@@ -17,6 +18,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="ProxyNetworker.Core.Tests" />
+    <InternalsVisibleTo Include="ProxyNetworker.Client" />
   </ItemGroup>
 
   <ItemGroup Condition="'$(RuntimeIdentifier)' == 'linux-x64'">

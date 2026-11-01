@@ -65,11 +65,12 @@ internal sealed class ManagementApiClient : IDisposable
         int listenPort,
         int mtu,
         string transportProtocol,
+        bool encryptionEnabled,
         CancellationToken cancellationToken)
     {
         var response = await _httpClient.PostAsJsonAsync(
             "api/virtual-networks",
-            new CreateVirtualNetworkDefinitionRequest(name, gatewayAddress, prefixLength, listenPort, mtu, transportProtocol),
+            new CreateVirtualNetworkDefinitionRequest(name, gatewayAddress, prefixLength, listenPort, mtu, transportProtocol, encryptionEnabled),
             ClientJsonContext.Default.CreateVirtualNetworkDefinitionRequest,
             cancellationToken).ConfigureAwait(false);
 
@@ -209,7 +210,8 @@ internal sealed record CreateVirtualNetworkDefinitionRequest(
     int PrefixLength,
     int ListenPort,
     int Mtu,
-    string TransportProtocol);
+    string TransportProtocol,
+    bool EncryptionEnabled);
 
 internal sealed record VirtualNetworkDefinitionResponse(
     string Id,
@@ -220,6 +222,7 @@ internal sealed record VirtualNetworkDefinitionResponse(
     int ListenPort,
     int Mtu,
     string TransportProtocol,
+    bool? EncryptionEnabled,
     bool IsEnabled,
     DateTimeOffset CreatedAt);
 
@@ -265,4 +268,5 @@ internal sealed record VirtualNetworkClientConfigResponse(
     int PrefixLength,
     int Mtu,
     string TransportProtocol,
+    bool? EncryptionEnabled,
     string AuthenticationKey);

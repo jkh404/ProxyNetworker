@@ -8,6 +8,10 @@ LOG_DIR="$SCRIPT_DIR/logs"
 PID_FILE="$PID_DIR/client.pid"
 LATEST_LOG="$LOG_DIR/client-console.latest.log"
 
+if [ -d "$SCRIPT_DIR" ]; then
+    export LD_LIBRARY_PATH="$SCRIPT_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
+
 usage() {
     cat <<'EOF'
 Usage: bash run.sh <start|stop|restart|status|logs> [ProxyNetworker.Client arguments...]

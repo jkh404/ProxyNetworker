@@ -125,6 +125,39 @@ public sealed class WintunAdapterWrapper : IDisposable
         return luid.Value;
     }
 
+    public void SetMtu(uint mtu)
+    {
+        ThrowIfDisposed();
+        if (_adapterPtr == IntPtr.Zero)
+        {
+            throw new InvalidOperationException("Wintun adapter is not open.");
+        }
+
+        WintunNative.WintunGetAdapterLUID(_adapterPtr, out WintunNative.NetLuidLh luid);
+        var row = new MIB_IPINTERFACE_ROW
+        {
+            Family = ADDRESS_FAMILY.AF_INET,
+            InterfaceLuid = new NET_LUID { Value = luid.Value }
+        };
+        var getError = GetIpInterfaceEntry(ref row);
+        if (getError.Failed)
+        {
+            throw new Win32Exception(
+                (int)(uint)getError,
+                $"Failed to read the Wintun IPv4 interface. Win32 error: {(uint)getError}.");
+        }
+
+        row.NlMtu = mtu;
+        row.SitePrefixLength = 0;
+        var setError = SetIpInterfaceEntry(in row);
+        if (setError.Failed)
+        {
+            throw new Win32Exception(
+                (int)(uint)setError,
+                $"Failed to set the Wintun IPv4 MTU. Win32 error: {(uint)setError}.");
+        }
+    }
+
     public void SendPacket(byte[] packetData)
     {
         ThrowIfDisposed();

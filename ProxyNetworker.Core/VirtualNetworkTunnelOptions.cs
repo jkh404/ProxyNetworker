@@ -16,6 +16,8 @@ public class VirtualNetworkTunnelOptions
 
     public byte[] AuthenticationKey { get; set; } = Array.Empty<byte>();
 
+    public bool EncryptionEnabled { get; set; } = true;
+
     public bool EnableDirectPaths { get; set; } = true;
 
     public IReadOnlyCollection<IPEndPoint> AdditionalCandidateEndPoints { get; set; } = Array.Empty<IPEndPoint>();

@@ -12,5 +12,7 @@ public sealed record VirtualNetworkPeerSnapshot(
     string ClientVersion,
     IPEndPoint PublicEndPoint,
     IReadOnlyList<IPEndPoint> LocalEndPoints,
+    long BytesSent,
+    long BytesReceived,
     DateTimeOffset ConnectedAt,
     DateTimeOffset LastSeenAt);

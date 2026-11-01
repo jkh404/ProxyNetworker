@@ -26,6 +26,7 @@ services:
       SystemSettings__PublicPortRangeStart: "40000"
       SystemSettings__PublicPortRangeEnd: "42999"
       DOTNET_EnableDiagnostics: "0"
+      LD_LIBRARY_PATH: /app
       TZ: Asia/Shanghai
     volumes:
       - ./data:/data

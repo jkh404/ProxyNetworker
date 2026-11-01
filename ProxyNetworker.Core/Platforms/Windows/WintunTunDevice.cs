@@ -45,8 +45,9 @@ internal sealed class WintunTunDevice : ITunDevice
             _adapter.OnReceive = OnReceive;
             _adapter.Open();
             _adapter.StartAsync(_options.Address, _options.WindowsSessionCapacity, checked((byte)_options.PrefixLength));
+            _adapter.SetMtu(checked((uint)_options.Mtu));
 
-            Log(ProxyNetworkerLogLevel.Information, $"Started Wintun adapter '{Name}' with {_options.Address}/{_options.PrefixLength}.");
+            Log(ProxyNetworkerLogLevel.Information, $"Started Wintun adapter '{Name}' with {_options.Address}/{_options.PrefixLength}, mtu={_options.Mtu}.");
             return Task.CompletedTask;
         }
         catch

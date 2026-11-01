@@ -25,8 +25,8 @@ async function api(path, options = {}) {
   return data;
 }
 
-function fmtDate(value) {
-  return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—';
+function fmtDate(value, locale = 'zh-CN') {
+  return value ? new Date(value).toLocaleString(locale, { hour12: false }) : '—';
 }
 
 function fmtBytes(value) {
@@ -39,6 +39,26 @@ function fmtBytes(value) {
     index++;
   }
   return `${size.toFixed(index ? 1 : 0)} ${units[index]}`;
+}
+
+function fmtTrafficBytes(value) {
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let size = Math.max(0, Number(value) || 0);
+  let index = 0;
+  while (size >= 1024 && index < units.length - 1) {
+    size /= 1024;
+    index++;
+  }
+  return `${size.toFixed(index ? 1 : 0)} ${units[index]}`;
+}
+
+function fmtTrafficSpeed(value) {
+  return `${fmtTrafficBytes(value)}/s`;
+}
+
+function compactLabel(value, maxLength = 22) {
+  const text = String(value || '').trim();
+  return text.length <= maxLength ? text : `${text.slice(0, maxLength - 1)}…`;
 }
 
 function normalizeTab(tab) {
@@ -91,7 +111,7 @@ function defaultUserForm(settings = null) {
     isDisabled: false
   };
 }
-function defaultVirtualNetworkForm() { return { name: '', gatewayAddress: '10.66.0.1', prefixLength: 24, transportProtocol: 'udp' }; }
+function defaultVirtualNetworkForm() { return { name: '', gatewayAddress: '10.66.0.1', prefixLength: 24, transportProtocol: 'udp', encryptionEnabled: true }; }
 function defaultPortTunnelForm() { return { name: '', protocol: 'tcp', privateHost: '127.0.0.1', privatePort: null }; }
 function defaultTokenForm() { return { tokenType: 'Permanent', validFrom: '', validUntil: '' }; }
 function defaultPasswordForm() { return { currentPassword: '', newPassword: '' }; }
@@ -100,17 +120,26 @@ function defaultSettingsForm() { return { publicPortRangeStart: 1, publicPortRan
 function defaultConfirm() { return { action: '', payload: null, title: '', message: '', confirmLabel: '删除', requireText: '', input: '' }; }
 
 const { createApp } = window.Vue;
+const { translateDocument } = window.ProxyNetworkerI18n;
 
 createApp({
   data() {
     return {
       sessionChecked: false,
+      language: localStorage.getItem('pn-ui-language') === 'en-US' ? 'en-US' : 'zh-CN',
+      translationObserver: null,
       me: null,
       users: [],
       virtualNetworks: [],
       detailsNetwork: null,
       virtualNetworkStatus: null,
+      virtualNetworkTopology: null,
       networkDetailsLoading: false,
+      topologyLoading: false,
+      topologyTimer: null,
+      virtualNetworkProtocolDraft: 'udp',
+      virtualNetworkEncryptionDraft: true,
+      tokenAddressDrafts: {},
       portTunnels: [],
       runtimeTunnels: [],
       tokens: [],
@@ -190,6 +219,84 @@ createApp({
     speedMax() { return this.settings?.maxTrafficSpeedBytesPerSecond > 0 ? this.settings.maxTrafficSpeedBytesPerSecond : null; },
     tokenResourceItems() { return this.selectedTokenKind === 'VirtualNetwork' ? this.virtualNetworks : this.portTunnels; },
     tokenTypeOptions() { return this.selectedTokenKind === 'VirtualNetwork' ? virtualNetworkTokenTypes : permanentTokenTypes; },
+    topologyGraphNodes() {
+      const nodes = this.virtualNetworkTopology?.nodes || [];
+      const server = nodes.find(node => node.role === 'server');
+      const clients = nodes.filter(node => node.role !== 'server');
+      const serverPoint = { x: 500, y: 280 };
+      const positions = new Map();
+      if (server) positions.set(server.virtualAddress, {
+        ...server,
+        ...serverPoint,
+        label: compactLabel(server.nodeName || server.machineName || 'Server', 18),
+        labelY: serverPoint.y + 70,
+        addressY: serverPoint.y + 87
+      });
+
+      const radiusX = clients.length > 8 ? 385 : 350;
+      const radiusY = clients.length > 8 ? 220 : 205;
+      clients.forEach((node, index) => {
+        const angle = -Math.PI / 2 + (index * Math.PI * 2 / Math.max(clients.length, 1));
+        const point = {
+          ...node,
+          x: serverPoint.x + Math.cos(angle) * radiusX,
+          y: serverPoint.y + Math.sin(angle) * radiusY,
+          label: compactLabel(node.nodeName || node.machineName || node.virtualAddress, 18),
+          labelY: -1,
+          addressY: -1
+        };
+        point.labelY = point.y > 360 ? point.y - 58 : point.y + 62;
+        point.addressY = point.y > 360 ? point.y - 42 : point.y + 78;
+        positions.set(node.virtualAddress, point);
+      });
+
+      return [...positions.values()];
+    },
+    topologyGraphEdges() {
+      const nodes = new Map(this.topologyGraphNodes.map(node => [node.virtualAddress, node]));
+      const sourceEdges = this.virtualNetworkTopology?.edges || [];
+      return sourceEdges.map((edge, index) => {
+        const source = nodes.get(edge.sourceAddress);
+        const destination = nodes.get(edge.destinationAddress);
+        if (!source || !destination) return null;
+        const dx = destination.x - source.x;
+        const dy = destination.y - source.y;
+        const distance = Math.max(1, Math.hypot(dx, dy));
+        const sourceRadius = source.role === 'server' ? 48 : 36;
+        const destinationRadius = destination.role === 'server' ? 48 : 36;
+        const unitX = dx / distance;
+        const unitY = dy / distance;
+        const totalBytes = (Number(edge.bytesSent) || 0) + (Number(edge.bytesReceived) || 0);
+        const currentBytesPerSecond = (Number(edge.bytesPerSecondSent) || 0) + (Number(edge.bytesPerSecondReceived) || 0);
+        const isDirect = edge.connectionType === 'direct';
+        const latency = this.topologyEdgeLatency(edge);
+        const label = `${latency} · ${currentBytesPerSecond > 0 ? fmtTrafficSpeed(currentBytesPerSecond) : fmtTrafficBytes(totalBytes)}`;
+        return {
+          ...edge,
+          isDirect,
+          x1: source.x + unitX * sourceRadius,
+          y1: source.y + unitY * sourceRadius,
+          x2: destination.x - unitX * destinationRadius,
+          y2: destination.y - unitY * destinationRadius,
+          labelX: (source.x + destination.x) / 2,
+          labelY: (source.y + destination.y) / 2,
+          labelWidth: Math.max(68, label.length * 7.2 + 18),
+          label,
+          showLabel: isDirect || sourceEdges.length <= 5,
+          motionPath: `M ${source.x + unitX * sourceRadius} ${source.y + unitY * sourceRadius} L ${destination.x - unitX * destinationRadius} ${destination.y - unitY * destinationRadius}`,
+          motionDuration: isDirect ? `${3.2 + (index % 3) * 0.35}s` : `${5.6 + (index % 4) * 0.45}s`,
+          motionBegin: `-${(index % 5) * 0.65}s`
+        };
+      }).filter(Boolean);
+    },
+    topologyDirectCount() { return (this.virtualNetworkTopology?.edges || []).filter(edge => edge.connectionType === 'direct').length; },
+    topologyRelayCount() { return (this.virtualNetworkTopology?.edges || []).filter(edge => edge.connectionType === 'relay').length; },
+    topologyTotalTraffic() {
+      return (this.virtualNetworkTopology?.edges || []).reduce((total, edge) => total + (Number(edge.bytesSent) || 0) + (Number(edge.bytesReceived) || 0), 0);
+    },
+    topologyCurrentSpeed() {
+      return (this.virtualNetworkTopology?.edges || []).reduce((total, edge) => total + (Number(edge.bytesPerSecondSent) || 0) + (Number(edge.bytesPerSecondReceived) || 0), 0);
+    },
     userEditor() { return this.activeDialog === 'userEdit' ? this.editingUser : this.userForm; },
     isDrawerOpen() { return ['userCreate', 'userEdit', 'virtualNetworkCreate', 'portTunnelCreate'].includes(this.activeDialog); },
     isCenterDialogOpen() { return ['password', 'resetPassword', 'confirm', 'virtualNetworkDetails'].includes(this.activeDialog); },
@@ -207,14 +314,24 @@ createApp({
       return Boolean(this.confirmDialog.requireText && this.confirmDialog.input !== this.confirmDialog.requireText);
     },
     lastUpdatedLabel() {
-      if (!this.lastUpdated) return 'SYNC --:--:--';
-      return `SYNC ${this.lastUpdated.toLocaleTimeString('zh-CN', { hour12: false })}`;
+      const prefix = this.language === 'en-US' ? 'SYNC' : '同步';
+      if (!this.lastUpdated) return `${prefix} --:--:--`;
+      return `${prefix} ${this.lastUpdated.toLocaleTimeString(this.language, { hour12: false })}`;
     }
   },
 
   async mounted() {
     window.addEventListener('hashchange', this.onHashChange);
     window.addEventListener('keydown', this.onKeydown);
+    this.applyLanguage();
+    this.translationObserver = new MutationObserver(() => this.applyLanguage());
+    this.translationObserver.observe(document.body, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+      attributes: true,
+      attributeFilter: ['placeholder', 'aria-label', 'title']
+    });
     await this.loadSession();
   },
 
@@ -222,11 +339,46 @@ createApp({
     window.removeEventListener('hashchange', this.onHashChange);
     window.removeEventListener('keydown', this.onKeydown);
     if (this.statusTimer) clearTimeout(this.statusTimer);
+    this.stopTopologyPolling();
+    this.translationObserver?.disconnect();
+    this.translationObserver = null;
   },
 
   methods: {
-    fmtDate,
+    fmtDate(value) { return fmtDate(value, this.language); },
     fmtBytes,
+    fmtTrafficBytes,
+    fmtTrafficSpeed,
+
+    resourceKindLabel(value) {
+      const labels = {
+        'virtual-network': this.language === 'en-US' ? 'Virtual network' : '虚拟局域网',
+        'port-tunnel': this.language === 'en-US' ? 'Port tunnel' : '内网穿透'
+      };
+      return labels[value] || value || '—';
+    },
+
+    protocolLabel(value) {
+      return value ? String(value).toUpperCase() : '—';
+    },
+
+    runtimeProtocol(item) {
+      if (item?.kind === 'virtual-network') {
+        return this.virtualNetworks.find(network => network.id === item.id)?.transportProtocol || item.protocol;
+      }
+      return item?.protocol;
+    },
+
+    runtimeStatusLabel(value) {
+      const labels = this.language === 'en-US'
+        ? { running: 'Running', stopped: 'Stopped', online: 'Online', offline: 'Offline' }
+        : { running: '运行中', stopped: '已停止', online: '在线', offline: '离线' };
+      return labels[String(value || '').toLowerCase()] || value || '—';
+    },
+
+    trafficTotalLabel(value) {
+      return `${fmtTrafficBytes(value)} ${this.language === 'en-US' ? 'total' : '累计'}`;
+    },
 
     initials(username) {
       const value = String(username || 'PN').trim();
@@ -238,16 +390,32 @@ createApp({
     },
 
     tokenTypeLabel(value) {
-      return { Permanent: '永久', Limited: '限期', OneTime: '一次性' }[value] || value || '—';
+      const labels = this.language === 'en-US'
+        ? { Permanent: 'Permanent', Limited: 'Limited', OneTime: 'One-time' }
+        : { Permanent: '永久', Limited: '限期', OneTime: '一次性' };
+      return labels[value] || value || '—';
     },
 
     fmtQuota(value) {
-      return Number(value) >= 2147483647 ? '不限' : value;
+      return Number(value) >= 2147483647 ? (this.language === 'en-US' ? 'Unlimited' : '不限') : value;
     },
 
     tokenValidityLabel(token) {
-      if (!token?.validFrom && !token?.validUntil) return '永久有效';
+      if (!token?.validFrom && !token?.validUntil) return this.language === 'en-US' ? 'Permanently valid' : '永久有效';
       return `${this.fmtDate(token.validFrom)} — ${this.fmtDate(token.validUntil)}`;
+    },
+
+    setLanguage(language) {
+      this.language = language === 'en-US' ? 'en-US' : 'zh-CN';
+      localStorage.setItem('pn-ui-language', this.language);
+      this.statusMessage = '';
+      this.applyLanguage();
+    },
+
+    applyLanguage() {
+      document.documentElement.lang = this.language;
+      translateDocument(document.body, this.language);
+      document.title = this.language === 'en-US' ? 'ProxyNetworker · Console' : 'ProxyNetworker · 控制台';
     },
 
     navCount(key) {
@@ -384,9 +552,12 @@ createApp({
 
     closeDialog() {
       if (this.dialogBusy) return;
+      this.stopTopologyPolling();
       this.activeDialog = null;
       this.detailsNetwork = null;
       this.virtualNetworkStatus = null;
+      this.virtualNetworkTopology = null;
+      this.tokenAddressDrafts = {};
       this.editingUser = null;
       this.resettingUser = null;
       this.confirmDialog = defaultConfirm();
@@ -420,10 +591,18 @@ createApp({
     },
 
     async openVirtualNetworkDetails(item) {
+      this.stopTopologyPolling();
       this.detailsNetwork = item;
       this.virtualNetworkStatus = null;
+      this.virtualNetworkTopology = null;
+      this.tokenAddressDrafts = {};
+      this.virtualNetworkProtocolDraft = item.transportProtocol || 'udp';
+      this.virtualNetworkEncryptionDraft = item.encryptionEnabled !== false;
       this.openDialog('virtualNetworkDetails');
-      await this.loadVirtualNetworkStatus(item.id);
+      await this.refreshVirtualNetworkDetails(item.id);
+      if (this.activeDialog === 'virtualNetworkDetails' && this.detailsNetwork?.id === item.id) {
+        this.startTopologyPolling();
+      }
     },
 
     async loadVirtualNetworkStatus(id) {
@@ -431,11 +610,51 @@ createApp({
       this.networkDetailsLoading = true;
       try {
         this.virtualNetworkStatus = await api(`/api/virtual-networks/${id}/status`);
+        const drafts = {};
+        for (const token of this.virtualNetworkStatus?.tokens || []) {
+          drafts[token.id] = token.assignedVirtualAddress || '';
+        }
+        this.tokenAddressDrafts = drafts;
       } catch (error) {
         this.setStatus(error.message, true);
       } finally {
         this.networkDetailsLoading = false;
       }
+    },
+
+    async loadVirtualNetworkTopology(id, silent = false) {
+      if (!id || this.topologyLoading) return;
+      this.topologyLoading = true;
+      try {
+        this.virtualNetworkTopology = await api(`/api/virtual-networks/${id}/topology`);
+      } catch (error) {
+        if (!silent) this.setStatus(error.message, true);
+      } finally {
+        this.topologyLoading = false;
+      }
+    },
+
+    async refreshVirtualNetworkDetails(id) {
+      const networkId = id || this.detailsNetwork?.id;
+      if (!networkId) return;
+      await Promise.all([
+        this.loadVirtualNetworkStatus(networkId),
+        this.loadVirtualNetworkTopology(networkId)
+      ]);
+    },
+
+    startTopologyPolling() {
+      this.stopTopologyPolling();
+      this.topologyTimer = setInterval(() => {
+        if (this.activeDialog === 'virtualNetworkDetails' && !this.dialogBusy && this.detailsNetwork?.id) {
+          this.loadVirtualNetworkTopology(this.detailsNetwork.id, true);
+        }
+      }, 5000);
+    },
+
+    stopTopologyPolling() {
+      if (this.topologyTimer) clearInterval(this.topologyTimer);
+      this.topologyTimer = null;
     },
 
     openPortTunnelCreate() {
@@ -674,7 +893,7 @@ createApp({
         await this.refreshAll();
         if (this.detailsNetwork?.id === item.id) {
           this.detailsNetwork = updated;
-          await this.loadVirtualNetworkStatus(item.id);
+          await this.refreshVirtualNetworkDetails(item.id);
         }
         this.setStatus(updated.isEnabled ? '虚拟局域网已启用' : '虚拟局域网已停用');
       } catch (error) {
@@ -684,6 +903,98 @@ createApp({
       }
     },
 
+    async changeVirtualNetworkProtocol() {
+      if (!this.detailsNetwork || this.dialogBusy) return;
+      const nextProtocol = this.virtualNetworkProtocolDraft;
+      if (nextProtocol === (this.detailsNetwork.transportProtocol || 'udp')) return;
+
+      this.dialogBusy = true;
+      try {
+        const updated = await api(`/api/virtual-networks/${this.detailsNetwork.id}/protocol`, {
+          method: 'PUT',
+          body: JSON.stringify({ transportProtocol: nextProtocol })
+        });
+        this.detailsNetwork = updated;
+        this.virtualNetworkProtocolDraft = updated.transportProtocol;
+        await this.refreshAll();
+        await this.refreshVirtualNetworkDetails(updated.id);
+        this.setStatus(this.language === 'en-US'
+          ? `Transport protocol switched to ${String(updated.transportProtocol || '').toUpperCase()}`
+          : `通信协议已切换为 ${String(updated.transportProtocol || '').toUpperCase()}`);
+      } catch (error) {
+        this.virtualNetworkProtocolDraft = this.detailsNetwork.transportProtocol || 'udp';
+        this.setStatus(error.message, true);
+      } finally {
+        this.dialogBusy = false;
+      }
+    },
+
+    async changeVirtualNetworkEncryption() {
+      if (!this.detailsNetwork || this.dialogBusy) return;
+      const nextValue = Boolean(this.virtualNetworkEncryptionDraft);
+      if (nextValue === (this.detailsNetwork.encryptionEnabled !== false)) return;
+
+      this.dialogBusy = true;
+      try {
+        const updated = await api(`/api/virtual-networks/${this.detailsNetwork.id}/encryption`, {
+          method: 'PUT',
+          body: JSON.stringify({ encryptionEnabled: nextValue })
+        });
+        this.detailsNetwork = updated;
+        this.virtualNetworkEncryptionDraft = updated.encryptionEnabled !== false;
+        await this.refreshAll();
+        await this.refreshVirtualNetworkDetails(updated.id);
+        this.setStatus(this.language === 'en-US'
+          ? (updated.encryptionEnabled ? 'Data encryption enabled' : 'Data encryption disabled; HMAC integrity verification remains active')
+          : (updated.encryptionEnabled ? '数据加密已启用' : '数据加密已关闭，仍保留 HMAC 完整性校验'));
+      } catch (error) {
+        this.virtualNetworkEncryptionDraft = this.detailsNetwork.encryptionEnabled !== false;
+        this.setStatus(error.message, true);
+      } finally {
+        this.dialogBusy = false;
+      }
+    },
+
+    tokenAddressDirty(token) {
+      return String(this.tokenAddressDrafts[token.id] || '').trim() !== String(token.assignedVirtualAddress || '');
+    },
+
+    async updateVirtualNetworkTokenAddress(token) {
+      const virtualAddress = String(this.tokenAddressDrafts[token.id] || '').trim();
+      if (!this.detailsNetwork || !token.id || !virtualAddress || this.dialogBusy) return;
+      this.dialogBusy = true;
+      try {
+        const result = await api(`/api/virtual-networks/${this.detailsNetwork.id}/tokens/${token.id}/virtual-address`, {
+          method: 'PUT',
+          body: JSON.stringify({ virtualAddress })
+        });
+        await this.refreshVirtualNetworkDetails(this.detailsNetwork.id);
+        this.setStatus(`Token ${token.tokenPreview} 的虚拟 IP 已改为 ${result.virtualAddress}，客户端将在配置刷新后自动切换`);
+      } catch (error) {
+        this.tokenAddressDrafts[token.id] = token.assignedVirtualAddress || '';
+        this.setStatus(error.message, true);
+      } finally {
+        this.dialogBusy = false;
+      }
+    },
+
+    topologyNodeName(address) {
+      const node = (this.virtualNetworkTopology?.nodes || []).find(item => item.virtualAddress === address);
+      return node?.nodeName || node?.machineName || address;
+    },
+
+    topologyEdgeLatency(edge) {
+      if (edge.rttMilliseconds == null) {
+        if (this.language === 'en-US') return edge.connectionType === 'direct' ? 'Direct' : 'Relay';
+        return edge.connectionType === 'direct' ? '直连' : '中继';
+      }
+      return `${Math.round(edge.rttMilliseconds)} ms`;
+    },
+
+    topologyEdgeLoss(edge) {
+      return edge.lossPercent == null ? '—' : `${Number(edge.lossPercent).toFixed(1)}%`;
+    },
+
     async banVirtualNetworkNode(networkId, virtualAddress) {
       this.dialogBusy = true;
       try {
@@ -691,7 +1002,7 @@ createApp({
           method: 'POST',
           body: JSON.stringify({ virtualAddress, reason: 'Banned by administrator' })
         });
-        await this.loadVirtualNetworkStatus(networkId);
+        await this.refreshVirtualNetworkDetails(networkId);
         this.setStatus(`节点 ${virtualAddress} 已封禁`);
       } catch (error) {
         this.setStatus(error.message, true);
@@ -704,7 +1015,7 @@ createApp({
       this.dialogBusy = true;
       try {
         await api(`/api/virtual-networks/${networkId}/bans/${encodeURIComponent(virtualAddress)}`, { method: 'DELETE' });
-        await this.loadVirtualNetworkStatus(networkId);
+        await this.refreshVirtualNetworkDetails(networkId);
         this.setStatus(`节点 ${virtualAddress} 已解封`);
       } catch (error) {
         this.setStatus(error.message, true);

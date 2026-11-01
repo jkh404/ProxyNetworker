@@ -18,10 +18,23 @@ RUN dotnet publish ProxyNetworker.Server/ProxyNetworker.Server.csproj \
     -p:DebugSymbols=false \
     -o /app/publish
 
-FROM mcr.microsoft.com/dotnet/runtime-deps:10.0-noble-chiseled-extra
+FROM ubuntu:20.04 AS openssl11
+
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libssl1.1 \
+    && rm -rf /var/lib/apt/lists/*
+
+FROM mcr.microsoft.com/dotnet/aspnet:10.0-noble
+
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libnuma1 \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY --from=build /app/publish/ ./
+COPY --from=openssl11 /usr/lib/x86_64-linux-gnu/libcrypto.so.1.1 /app/
+
+ENV LD_LIBRARY_PATH=/app
 
 USER 1654:1654
 

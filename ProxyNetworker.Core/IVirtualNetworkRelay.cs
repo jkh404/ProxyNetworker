@@ -8,6 +8,8 @@ public interface IVirtualNetworkRelay : IDisposable
 
     IReadOnlyList<VirtualNetworkPeerSnapshot> GetPeerSnapshots();
 
+    VirtualNetworkTopologySnapshot GetTopologySnapshot();
+
     Task StartAsync(CancellationToken cancellationToken = default);
 
     void SetPeerBanned(IPAddress virtualAddress, bool isBanned);

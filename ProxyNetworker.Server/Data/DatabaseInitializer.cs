@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using ProxyNetworker.Server.Management;
 using ProxyNetworker.Server.Security;
+using ProxyNetworker.Server.VirtualNetworks;
 
 namespace ProxyNetworker.Server.Data;
 
@@ -35,6 +36,7 @@ public sealed class DatabaseInitializer : IHostedService
         await EnsureVirtualNetworkColumnsAsync(db, _networkDefaultsOptions, cancellationToken).ConfigureAwait(false);
         await EnsurePortTunnelColumnsAsync(db, cancellationToken).ConfigureAwait(false);
         await EnsureAccessTokenColumnsAsync(db, cancellationToken).ConfigureAwait(false);
+        await BackfillVirtualNetworkTokenAddressesAsync(db, cancellationToken).ConfigureAwait(false);
         await EnsureVirtualNetworkSessionsAsync(db, cancellationToken).ConfigureAwait(false);
         await EnsureVirtualNetworkBansAsync(db, cancellationToken).ConfigureAwait(false);
         await EnsureSystemSettingsAsync(db, _systemSettingsOptions, cancellationToken).ConfigureAwait(false);
@@ -72,6 +74,13 @@ public sealed class DatabaseInitializer : IHostedService
         {
             await db.Database.ExecuteSqlRawAsync(
                 """ALTER TABLE "VirtualNetworks" ADD COLUMN "TransportProtocol" TEXT NOT NULL DEFAULT 'udp';""",
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        if (!await ColumnExistsAsync(db, "VirtualNetworks", "EncryptionEnabled", cancellationToken).ConfigureAwait(false))
+        {
+            await db.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "VirtualNetworks" ADD COLUMN "EncryptionEnabled" INTEGER NOT NULL DEFAULT 1;""",
                 cancellationToken).ConfigureAwait(false);
         }
 
@@ -172,6 +181,13 @@ public sealed class DatabaseInitializer : IHostedService
                 cancellationToken).ConfigureAwait(false);
         }
 
+        if (!await ColumnExistsAsync(db, "AccessTokens", "VirtualAddress", cancellationToken).ConfigureAwait(false))
+        {
+            await db.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "AccessTokens" ADD COLUMN "VirtualAddress" TEXT NULL;""",
+                cancellationToken).ConfigureAwait(false);
+        }
+
         await db.Database.ExecuteSqlRawAsync(
             """
             UPDATE "AccessTokens"
@@ -182,6 +198,34 @@ public sealed class DatabaseInitializer : IHostedService
                 ON "AccessTokens" ("ScopeKind", "ResourceId", "CreatedAtUnixMs");
             CREATE INDEX IF NOT EXISTS "IX_AccessTokens_ScopeKind_ResourceId_CreatedAtUnixMs_Id"
                 ON "AccessTokens" ("ScopeKind", "ResourceId", "CreatedAtUnixMs", "Id");
+            """,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task BackfillVirtualNetworkTokenAddressesAsync(
+        ProxyNetworkerDbContext db,
+        CancellationToken cancellationToken)
+    {
+        var networks = await db.VirtualNetworks
+            .AsNoTracking()
+            .ToArrayAsync(cancellationToken)
+            .ConfigureAwait(false);
+        foreach (var network in networks)
+        {
+            var tokens = await db.AccessTokens
+                .Where(item => item.ScopeKind == AccessTokenScopes.VirtualNetwork && item.ResourceId == network.Id)
+                .OrderBy(item => item.CreatedAtUnixMs)
+                .ThenBy(item => item.Id)
+                .ToArrayAsync(cancellationToken)
+                .ConfigureAwait(false);
+            VirtualNetworkAccessService.BackfillClientAddresses(network, tokens);
+        }
+
+        await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        await db.Database.ExecuteSqlRawAsync(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS "IX_AccessTokens_ScopeKind_ResourceId_VirtualAddress"
+                ON "AccessTokens" ("ScopeKind", "ResourceId", "VirtualAddress");
             """,
             cancellationToken).ConfigureAwait(false);
     }

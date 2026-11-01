@@ -7,7 +7,8 @@ public sealed record ServerInfoResponse(
 
 public sealed record HealthResponse(
     string Status,
-    DateTimeOffset CheckedAt);
+    DateTimeOffset CheckedAt,
+    bool QuicSupported);
 
 public sealed record ErrorResponse(string Message);
 

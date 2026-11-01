@@ -16,6 +16,8 @@ public sealed class AccessTokenRecord
 
     public string TokenType { get; set; } = AccessTokenTypes.Permanent;
 
+    public string? VirtualAddress { get; set; }
+
     public DateTimeOffset? ValidFrom { get; set; }
 
     public DateTimeOffset? ValidUntil { get; set; }

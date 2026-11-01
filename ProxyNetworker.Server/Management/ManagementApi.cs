@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
+using ProxyNetworker.Core;
 using ProxyNetworker.Server.Data;
 using ProxyNetworker.Server.Security;
 using ProxyNetworker.Server.VirtualNetworks;
@@ -42,8 +43,12 @@ public static class ManagementApi
         virtualNetworks.MapDelete("/{id}", DeleteVirtualNetwork);
         virtualNetworks.MapGet("/{id}/tokens", ListVirtualNetworkTokens);
         virtualNetworks.MapPost("/{id}/tokens", CreateVirtualNetworkToken);
+        virtualNetworks.MapPut("/{id}/tokens/{tokenId}/virtual-address", UpdateVirtualNetworkTokenAddress);
         virtualNetworks.MapGet("/{id}/status", GetVirtualNetworkStatus);
+        virtualNetworks.MapGet("/{id}/topology", GetVirtualNetworkTopology);
         virtualNetworks.MapPut("/{id}/enabled", SetVirtualNetworkEnabled);
+        virtualNetworks.MapPut("/{id}/protocol", SetVirtualNetworkProtocol);
+        virtualNetworks.MapPut("/{id}/encryption", SetVirtualNetworkEncryption);
         virtualNetworks.MapPost("/{id}/bans", BanVirtualNetworkNode);
         virtualNetworks.MapDelete("/{id}/bans/{virtualAddress}", UnbanVirtualNetworkNode);
 
@@ -464,6 +469,7 @@ public static class ManagementApi
             ListenPort = listenPort.Value,
             Mtu = mtu,
             TransportProtocol = transportProtocol,
+            EncryptionEnabled = request.EncryptionEnabled,
             CreatedAt = createdAt,
             CreatedAtUnixMs = createdAt.ToUnixTimeMilliseconds()
         };
@@ -721,6 +727,116 @@ public static class ManagementApi
             bans));
     }
 
+    private static async Task<IResult> GetVirtualNetworkTopology(
+        string id,
+        ClaimsPrincipal principal,
+        ProxyNetworkerDbContext db,
+        VirtualNetworkRuntimeRegistry runtimeRegistry,
+        CancellationToken cancellationToken)
+    {
+        var network = await FindVirtualNetworkAsync(id, principal, db, cancellationToken).ConfigureAwait(false);
+        if (network is null)
+        {
+            return TypedResults.NotFound(new ErrorResponse("Virtual Network was not found."));
+        }
+
+        var tokens = await db.AccessTokens
+            .AsNoTracking()
+            .Where(item => item.ScopeKind == AccessTokenScopes.VirtualNetwork && item.ResourceId == id)
+            .OrderBy(item => item.CreatedAtUnixMs)
+            .ThenBy(item => item.Id)
+            .ToArrayAsync(cancellationToken)
+            .ConfigureAwait(false);
+        var tokenByAddress = new Dictionary<string, AccessTokenRecord>(StringComparer.OrdinalIgnoreCase);
+        foreach (var token in tokens)
+        {
+            var address = VirtualNetworkAccessService.ResolveClientAddress(network, token.Id, tokens);
+            if (address is not null)
+            {
+                tokenByAddress[address.ToString()] = token;
+            }
+        }
+
+        var topology = runtimeRegistry.GetTopologySnapshot(id);
+        if (topology is null)
+        {
+            var serverInfo = VirtualNetworkNodeInfo.FromEnvironment(network.Name);
+            var capturedAt = DateTimeOffset.UtcNow;
+            topology = new VirtualNetworkTopologySnapshot(
+                network.TransportProtocol,
+                capturedAt,
+                [
+                    new VirtualNetworkTopologyNodeSnapshot(
+                        IPAddress.Parse(network.GatewayAddress),
+                        "server",
+                        serverInfo.NodeName,
+                        serverInfo.MachineName,
+                        serverInfo.OsDescription,
+                        serverInfo.OsArchitecture,
+                        serverInfo.ProcessArchitecture,
+                        serverInfo.ClientVersion,
+                        network.IsEnabled,
+                        0,
+                        0,
+                        null,
+                        capturedAt)
+                ],
+                []);
+        }
+
+        var nodes = topology.Nodes
+            .Select(node =>
+            {
+                tokenByAddress.TryGetValue(node.VirtualAddress.ToString(), out var token);
+                return new VirtualNetworkTopologyNodeResponse(
+                    node.VirtualAddress.ToString(),
+                    node.Role,
+                    node.NodeName,
+                    node.MachineName,
+                    node.OsDescription,
+                    node.OsArchitecture,
+                    node.ProcessArchitecture,
+                    node.ClientVersion,
+                    node.IsOnline,
+                    token?.Id ?? string.Empty,
+                    token?.TokenPreview ?? string.Empty,
+                    node.BytesSent,
+                    node.BytesReceived,
+                    node.ConnectedAt,
+                    node.LastSeenAt);
+            })
+            .OrderByDescending(static node => node.Role == "server")
+            .ThenBy(static node => node.VirtualAddress, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var edges = topology.Edges
+            .Select(edge => new VirtualNetworkTopologyEdgeResponse(
+                edge.SourceAddress.ToString(),
+                edge.DestinationAddress.ToString(),
+                edge.ConnectionType,
+                edge.TransportProtocol,
+                edge.RttMilliseconds,
+                edge.JitterMilliseconds,
+                edge.LossPercent,
+                edge.CostMilliseconds,
+                edge.BytesSent,
+                edge.BytesReceived,
+                edge.BytesPerSecondSent,
+                edge.BytesPerSecondReceived,
+                edge.LastSeenAt))
+            .OrderBy(static edge => edge.ConnectionType == VirtualNetworkTopologyConnectionTypes.Direct ? 0 : 1)
+            .ThenBy(static edge => edge.SourceAddress, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(static edge => edge.DestinationAddress, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        return TypedResults.Ok(new VirtualNetworkTopologyResponse(
+            network.IsEnabled,
+            network.GatewayAddress,
+            topology.TransportProtocol,
+            topology.CapturedAt,
+            nodes,
+            edges));
+    }
+
     private static async Task<IResult> SetVirtualNetworkEnabled(
         string id,
         SetVirtualNetworkEnabledRequest request,
@@ -739,7 +855,111 @@ public static class ManagementApi
         await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         if (!request.Enabled)
         {
-            runtimeRegistry.Stop(id);
+            await runtimeRegistry.StopAsync(id, cancellationToken).ConfigureAwait(false);
+        }
+
+        return TypedResults.Ok(ToVirtualNetworkResponse(network));
+    }
+
+    private static async Task<IResult> SetVirtualNetworkProtocol(
+        string id,
+        SetVirtualNetworkProtocolRequest request,
+        ClaimsPrincipal principal,
+        ProxyNetworkerDbContext db,
+        VirtualNetworkRuntimeRegistry runtimeRegistry,
+        CancellationToken cancellationToken)
+    {
+        var network = await FindVirtualNetworkAsync(id, principal, db, cancellationToken).ConfigureAwait(false);
+        if (network is null)
+        {
+            return TypedResults.NotFound(new ErrorResponse("Virtual Network was not found."));
+        }
+
+        if (!ProxyNetworker.Core.VirtualNetworkTransportProtocols.IsSupported(request.TransportProtocol))
+        {
+            return TypedResults.BadRequest(new ErrorResponse("Transport protocol must be udp or quic."));
+        }
+
+        var transportProtocol = ProxyNetworker.Core.VirtualNetworkTransportProtocols.Normalize(request.TransportProtocol);
+        if (string.Equals(network.TransportProtocol, transportProtocol, StringComparison.OrdinalIgnoreCase))
+        {
+            return TypedResults.Ok(ToVirtualNetworkResponse(network));
+        }
+
+        var previousProtocol = network.TransportProtocol;
+        network.TransportProtocol = transportProtocol;
+        await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        if (!network.IsEnabled)
+        {
+            return TypedResults.Ok(ToVirtualNetworkResponse(network));
+        }
+
+        try
+        {
+            await runtimeRegistry.RestartAsync(network, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or PlatformNotSupportedException or UnauthorizedAccessException or System.Net.Sockets.SocketException)
+        {
+            network.TransportProtocol = previousProtocol;
+            await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                await runtimeRegistry.RestartAsync(network, cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+            }
+
+            return TypedResults.BadRequest(new ErrorResponse($"Failed to switch transport protocol: {ex.Message}"));
+        }
+
+        return TypedResults.Ok(ToVirtualNetworkResponse(network));
+    }
+
+    private static async Task<IResult> SetVirtualNetworkEncryption(
+        string id,
+        SetVirtualNetworkEncryptionRequest request,
+        ClaimsPrincipal principal,
+        ProxyNetworkerDbContext db,
+        VirtualNetworkRuntimeRegistry runtimeRegistry,
+        CancellationToken cancellationToken)
+    {
+        var network = await FindVirtualNetworkAsync(id, principal, db, cancellationToken).ConfigureAwait(false);
+        if (network is null)
+        {
+            return TypedResults.NotFound(new ErrorResponse("Virtual Network was not found."));
+        }
+
+        if (network.EncryptionEnabled == request.EncryptionEnabled)
+        {
+            return TypedResults.Ok(ToVirtualNetworkResponse(network));
+        }
+
+        var previousValue = network.EncryptionEnabled;
+        network.EncryptionEnabled = request.EncryptionEnabled;
+        await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        if (!network.IsEnabled)
+        {
+            return TypedResults.Ok(ToVirtualNetworkResponse(network));
+        }
+
+        try
+        {
+            await runtimeRegistry.RestartAsync(network, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or PlatformNotSupportedException or UnauthorizedAccessException or System.Net.Sockets.SocketException)
+        {
+            network.EncryptionEnabled = previousValue;
+            await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                await runtimeRegistry.RestartAsync(network, cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+            }
+
+            return TypedResults.BadRequest(new ErrorResponse($"Failed to switch encryption mode: {ex.Message}"));
         }
 
         return TypedResults.Ok(ToVirtualNetworkResponse(network));
@@ -849,6 +1069,30 @@ public static class ManagementApi
         CancellationToken cancellationToken)
     {
         return CreateToken(id, AccessTokenScopes.VirtualNetwork, "vnet", request, principal, db, tokenGenerator, tokenSecretProtector, cancellationToken);
+    }
+
+    private static async Task<IResult> UpdateVirtualNetworkTokenAddress(
+        string id,
+        string tokenId,
+        UpdateVirtualNetworkTokenAddressRequest request,
+        ClaimsPrincipal principal,
+        ProxyNetworkerDbContext db,
+        VirtualNetworkAccessService accessService,
+        CancellationToken cancellationToken)
+    {
+        var network = await FindVirtualNetworkAsync(id, principal, db, cancellationToken).ConfigureAwait(false);
+        if (network is null)
+        {
+            return TypedResults.NotFound(new ErrorResponse("Virtual Network was not found."));
+        }
+
+        var result = await accessService.AssignClientAddressAsync(id, tokenId, request.VirtualAddress, cancellationToken).ConfigureAwait(false);
+        if (!result.Succeeded)
+        {
+            return TypedResults.BadRequest(new ErrorResponse(result.Error));
+        }
+
+        return TypedResults.Ok(new VirtualNetworkTokenAddressResponse(tokenId, result.VirtualAddress));
     }
 
     private static Task<IResult> ListPortTunnelTokens(
@@ -1328,6 +1572,7 @@ public static class ManagementApi
             record.ListenPort,
             record.Mtu,
             record.TransportProtocol,
+            record.EncryptionEnabled,
             record.IsEnabled,
             record.CreatedAt);
     }
@@ -1359,6 +1604,7 @@ public static class ManagementApi
             record.ValidUntil,
             record.IsConsumed,
             !string.IsNullOrWhiteSpace(record.ProtectedTokenValue),
+            record.VirtualAddress ?? string.Empty,
             record.CreatedAt);
     }
 

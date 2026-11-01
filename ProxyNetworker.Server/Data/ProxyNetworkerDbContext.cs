@@ -66,9 +66,11 @@ public sealed class ProxyNetworkerDbContext : DbContext
         accessToken.Property(item => item.ProtectedTokenValue).HasMaxLength(2048);
         accessToken.Property(item => item.TokenPreview).HasMaxLength(24).IsRequired();
         accessToken.Property(item => item.TokenType).HasMaxLength(32).IsRequired();
+        accessToken.Property(item => item.VirtualAddress).HasMaxLength(64);
         accessToken.Property(item => item.CreatedByUserId).HasMaxLength(32).IsRequired();
         accessToken.HasIndex(item => item.TokenHash).IsUnique();
         accessToken.HasIndex(item => new { item.ScopeKind, item.ResourceId });
+        accessToken.HasIndex(item => new { item.ScopeKind, item.ResourceId, item.VirtualAddress }).IsUnique();
         accessToken.HasIndex(item => new { item.ScopeKind, item.ResourceId, item.CreatedAtUnixMs, item.Id });
 
         var systemSettings = modelBuilder.Entity<SystemSettingsRecord>();

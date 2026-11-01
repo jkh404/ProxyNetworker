@@ -13,19 +13,20 @@ ProxyNetworker 的目标不是简单复制一个端口转发工具，而是把�
 - **网状智能选路**：UDP 节点交换候选地址和直连链路质量，根据 RTT、抖动、丢包率和跳数计算最低成本路径；支持 `A -> C -> B` 节点转发，链路不可用时回退到服务端中继。
 - **UDP/QUIC 双协议**：UDP 提供网状直连和多跳转发；QUIC 为需要可靠流式中继的场景提供备选。KCP 经过实际测试后因尾部延迟过高被移除。
 - **跨平台 Native AOT 客户端**：已实测 Windows 11 x64、Ubuntu 24.04 x64 和 Debian 13 Raspberry Pi arm64，发布后不需要目标机器预装 .NET。
-- **完整的数据面安全**：Token 按资源发放，虚拟网络使用临时 256 位会话密钥，UDP 数据帧通过 AES-GCM 加密和完整性校验。
-- **面向运维的管理能力**：支持用户与资源配额、Token 管理、网络启停、节点封禁、在线设备、连接历史和协议选择。
+- **可配置的数据面安全**：Token 按资源发放，虚拟网络使用临时 256 位会话密钥；默认使用 AES-GCM 加密和完整性校验，也可关闭机密性并保留 HMAC-SHA256 完整性校验。
+- **Linux 数据面加速**：UDP 使用 `recvmmsg`/`sendmmsg` 批量收发，TUN 在支持时启用 `vnet_hdr`/GSO 批处理，并对非 GSO 校验和卸载、TSO 分段和不支持平台自动回退。
+- **面向运维的管理能力**：支持用户与资源配额、Token 管理、网络启停、节点封禁、在线设备、连接历史、协议选择，以及包含服务端、直连和 Mesh 链路的实时拓扑、上下行速率与累计流量视图；管理面板默认中文并可切换英文。
 - **部署门槛低**：服务端使用 SQLite，无外部数据库依赖；支持 Docker Compose；Linux 客户端提供基于 `nohup` 的后台启动脚本。
 - **可验证的工程选择**：协议与平台结论来自实际构建、跨节点测试和延迟数据，而不是只依据理论特性。
 
 ## 主要功能
 
 - 端口穿透：将 TCP 或 UDP 内网服务映射到服务端分配的稳定公网端口。
-- 虚拟局域网：为不同网络中的设备分配虚拟 IPv4 地址，支持节点直接通信。
+- 虚拟局域网：Token 首次上线时自动分配并持久化虚拟 IPv4 地址，后续默认保持不变；管理员可以改址，客户端会在配置刷新后自动切换。
 - UDP 网状路由：通过加密探针测量邻居链路，计算最低成本路径，并支持节点多跳转发和服务端中继兜底。
 - QUIC 传输：为需要可靠流式中继的场景提供 QUIC 服务端中继支持。
 - Token 接入：使用 `ptun_` 和 `vnet_` Token 分别接入端口穿透和虚拟网络。
-- 管理面板：管理用户、配额、Token、在线节点、连接历史、网络状态和节点封禁。
+- 管理面板：管理用户、配额、Token、在线节点、连接历史、网络状态和节点封禁，并展示服务端、UDP 直连/Mesh 与服务端中继的拓扑及链路流量。
 - 跨平台客户端：支持 Windows x64、Linux x64 和 Linux ARM64，可发布为 Native AOT 自包含程序。
 - SQLite 持久化：服务端配置、用户、资源和会话历史保存在本地 SQLite 数据库中。
 
@@ -39,7 +40,7 @@ ProxyNetworker 的目标不是简单复制一个端口转发工具，而是把�
 | Server | Ubuntu 24.04.5 LTS | x64 | 管理面板、端口分配、UDP/QUIC 虚拟网络和中继服务 |
 | Server | Ubuntu 24.04.5 LTS + Docker | x64 | Docker Compose 构建、健康检查和线上部署 |
 | Client | Windows 11 专业版 | x64 | 端口穿透、虚拟网络、TUN 设备和多节点互通 |
-| Client | Ubuntu 24.04.5 LTS | x64 | 端口穿透、虚拟网络、UDP 直连与中继回退 |
+| Client | Ubuntu 24.04.5 LTS | x64 | 端口穿透、虚拟网络、`recvmmsg`/`sendmmsg`、TUN GSO、AES-GCM/HMAC-only、UDP 直连与中继回退 |
 | Client | Debian GNU/Linux 13（Raspberry Pi） | arm64 | 虚拟网络、TUN 设备和跨平台节点互通 |
 
 “已实测”表示上述环境和架构中已经完成实际运行验证。其他 Linux 发行版只要满足 .NET 10、TUN 和 `iproute2` 等依赖，通常也可以运行，但尚未逐一列入验证矩阵。
@@ -152,10 +153,12 @@ bash run.sh stop
 
 | 协议 | 特点 | 适用场景 |
 | --- | --- | --- |
-| `udp` | 加密数据报、直连探测、网状多跳路由、自动中继回退 | 默认选择，优先获得更低延迟 |
+| `udp` | 认证数据报（AES-GCM 或 HMAC-only）、直连探测、网状多跳路由、自动中继回退 | 默认选择，优先获得更低延迟 |
 | `quic` | 加密可靠流、通过服务端中继 | 网络丢包较多或需要可靠流式传输；暂不支持 P2P mesh |
 
-UDP 控制帧和虚拟网络 IP 包使用临时会话密钥进行 AES-GCM 加密和完整性校验。协议选择和测试数据见 [虚拟网络协议文档](ProxyNetworker.Server/README.Protocols.md)。
+UDP 控制帧和虚拟网络 IP 包默认使用临时会话密钥进行 AES-GCM 加密和完整性校验。协议选择和测试数据见 [虚拟网络协议文档](ProxyNetworker.Server/README.Protocols.md)。
+
+加密模式可在管理面板中创建或切换。关闭加密后报文仍带 HMAC-SHA256 完整性标签，能够检测篡改，但不再提供内容机密性。默认保持开启；切换后服务端会重建运行时，在线客户端会自动刷新配置并重连。
 
 ## Native AOT 发布
 
@@ -198,6 +201,7 @@ dotnet script ".\通用dotnet编译发布脚本.csx" -- ".\ProxyNetworker.Client
 - [服务端配置说明](ProxyNetworker.Server/README.Configuration.md)
 - [虚拟网络协议与测试结果](ProxyNetworker.Server/README.Protocols.md)
 - [UDP 网状路由架构](docs/MESH_ROUTING.md)
+- [Linux UDP 批处理与 TUN GSO 性能报告](docs/2026-11-01-linux-batch-gso-report.md)
 - [四节点虚拟局域网测试与改进报告](docs/2026-11-01-vnet-aot-smart-routing-report.md)
 - [发布新版本](RELEASING.md)
 

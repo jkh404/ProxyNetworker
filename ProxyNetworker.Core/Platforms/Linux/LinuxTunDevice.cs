@@ -4,13 +4,18 @@ using System.Runtime.InteropServices;
 
 namespace ProxyNetworker.Core.Platforms.Linux;
 
-internal sealed partial class LinuxTunDevice : ITunDevice
+internal sealed partial class LinuxTunDevice : ITunDevice, ITunBatchDevice
 {
     private const int O_RDWR = 2;
     private const int O_NONBLOCK = 0x800;
     private const short IFF_TUN = 0x0001;
     private const short IFF_NO_PI = 0x1000;
+    private const short IFF_VNET_HDR = 0x4000;
     private const ulong TUNSETIFF = 0x400454ca;
+    private const ulong TUNSETOFFLOAD = 0x400454d0;
+    private const ulong TUNSETVNETHDRSZ = 0x400454d8;
+    private const uint TUN_F_CSUM = 0x01;
+    private const uint TUN_F_TSO4 = 0x02;
     private const int IFNAMSIZ = 16;
     private const int MaxPacketSize = 65535;
     private const int PollTimeoutMilliseconds = 500;
@@ -27,6 +32,12 @@ internal sealed partial class LinuxTunDevice : ITunDevice
     private int _fileDescriptor = -1;
     private CancellationTokenSource? _readLoopCancellation;
     private Task? _readLoop;
+    private readonly object _writeLock = new();
+    private readonly byte[] _gsoSegmentBuffer = GC.AllocateUninitializedArray<byte>(MaxPacketSize * 2);
+    private readonly byte[] _gsoAggregateBuffer = GC.AllocateUninitializedArray<byte>(MaxPacketSize);
+    private readonly bool _gsoSendAggregationEnabled = !IsEnvironmentFlagEnabled("PN_DISABLE_GSO_TX");
+    private int _vnetHeaderSize;
+    private bool _gsoEnabled;
     private int _started;
 
     public LinuxTunDevice(TunDeviceOptions options, Action<ProxyNetworkerLogEntry>? logger)
@@ -69,6 +80,9 @@ internal sealed partial class LinuxTunDevice : ITunDevice
             return;
         }
 
+        _vnetHeaderSize = 0;
+        _gsoEnabled = false;
+
         var fd = open("/dev/net/tun", O_RDWR | O_NONBLOCK);
         if (fd < 0)
         {
@@ -78,11 +92,62 @@ internal sealed partial class LinuxTunDevice : ITunDevice
 
         try
         {
-            var ifr = IfReq.Create(_options.Name, IFF_TUN | IFF_NO_PI);
-
-            if (ioctl(fd, TUNSETIFF, ref ifr) < 0)
+            var ifr = IfReq.Create(_options.Name, IFF_TUN | IFF_NO_PI | IFF_VNET_HDR);
+            var vnetResult = ioctl(fd, TUNSETIFF, ref ifr);
+            if (vnetResult < 0)
             {
-                throw new InvalidOperationException($"Failed to create Linux TUN device '{_options.Name}'. errno={Marshal.GetLastPInvokeError()}.");
+                var vnetError = Marshal.GetLastPInvokeError();
+                close(fd);
+                fd = open("/dev/net/tun", O_RDWR | O_NONBLOCK);
+                if (fd < 0)
+                {
+                    throw new InvalidOperationException($"Failed to reopen /dev/net/tun after vnet_hdr fallback. errno={Marshal.GetLastPInvokeError()}.");
+                }
+
+                ifr = IfReq.Create(_options.Name, IFF_TUN | IFF_NO_PI);
+                if (ioctl(fd, TUNSETIFF, ref ifr) < 0)
+                {
+                    throw new InvalidOperationException(
+                        $"Failed to create Linux TUN device '{_options.Name}'. vnet_hdr errno={vnetError}, basic errno={Marshal.GetLastPInvokeError()}.");
+                }
+
+                Log(ProxyNetworkerLogLevel.Information,
+                    $"Linux TUN vnet_hdr is unavailable; using the standard packet path (errno={vnetError}).");
+            }
+            else
+            {
+                var headerSize = LinuxTunGso.VirtioHeaderSize;
+                if (ioctlInt(fd, TUNSETVNETHDRSZ, ref headerSize) == 0)
+                {
+                    _vnetHeaderSize = headerSize;
+                    var offload = checked((int)(TUN_F_CSUM | TUN_F_TSO4));
+                    if (ioctlValue(fd, TUNSETOFFLOAD, checked((nuint)offload)) == 0)
+                    {
+                        _gsoEnabled = true;
+                    }
+                    else
+                    {
+                        Log(ProxyNetworkerLogLevel.Warning,
+                            $"Linux TUN vnet_hdr is active but TSO4 offload could not be enabled. errno={Marshal.GetLastPInvokeError()}.");
+                    }
+                }
+                else
+                {
+                    Log(ProxyNetworkerLogLevel.Warning,
+                        $"Linux TUN vnet_hdr header sizing failed; disabling virtio metadata. errno={Marshal.GetLastPInvokeError()}.");
+                    close(fd);
+                    fd = open("/dev/net/tun", O_RDWR | O_NONBLOCK);
+                    if (fd < 0)
+                    {
+                        throw new InvalidOperationException($"Failed to reopen /dev/net/tun after virtio header fallback. errno={Marshal.GetLastPInvokeError()}.");
+                    }
+
+                    ifr = IfReq.Create(_options.Name, IFF_TUN | IFF_NO_PI);
+                    if (ioctl(fd, TUNSETIFF, ref ifr) < 0)
+                    {
+                        throw new InvalidOperationException($"Failed to recreate Linux TUN device '{_options.Name}' without vnet_hdr. errno={Marshal.GetLastPInvokeError()}.");
+                    }
+                }
             }
 
             Name = ifr.GetName();
@@ -97,7 +162,8 @@ internal sealed partial class LinuxTunDevice : ITunDevice
             _readLoopCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             _readLoop = Task.Run(() => ReadLoop(_readLoopCancellation.Token));
 
-            Log(ProxyNetworkerLogLevel.Information, $"Started Linux TUN device '{Name}' with {_options.Address}/{_options.PrefixLength}.");
+            Log(ProxyNetworkerLogLevel.Information,
+                $"Started Linux TUN device '{Name}' with {_options.Address}/{_options.PrefixLength}; vnet_hdr={_vnetHeaderSize > 0}, gso={_gsoEnabled}.");
         }
         catch
         {
@@ -132,21 +198,140 @@ internal sealed partial class LinuxTunDevice : ITunDevice
             throw new InvalidOperationException("The Linux TUN device has not been started.");
         }
 
-        var buffer = packet.ToArray();
-        var offset = 0;
-        while (offset < buffer.Length)
+        lock (_writeLock)
         {
-            if (!WaitForEvent(fd, POLLOUT, cancellationToken))
+            WritePacket(fd, packet.Span, VirtioNetHeader.None, cancellationToken);
+        }
+
+        return ValueTask.CompletedTask;
+    }
+
+    public ValueTask SendBatchAsync(
+        IReadOnlyList<ReadOnlyMemory<byte>> packets,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (packets.Count == 0)
+        {
+            return ValueTask.CompletedTask;
+        }
+
+        var fd = Volatile.Read(ref _fileDescriptor);
+        if (fd < 0)
+        {
+            throw new InvalidOperationException("The Linux TUN device has not been started.");
+        }
+
+        lock (_writeLock)
+        {
+            var index = 0;
+            while (index < packets.Count)
             {
-                return ValueTask.CompletedTask;
+                if (_gsoEnabled && _gsoSendAggregationEnabled &&
+                    LinuxTunGso.TryBuildTcpV4Aggregate(
+                        packets,
+                        index,
+                        _gsoAggregateBuffer,
+                        out var aggregate))
+                {
+                    var header = new VirtioNetHeader(
+                        LinuxTunGso.FlagNeedsChecksum,
+                        LinuxTunGso.GsoTcpV4,
+                        checked((ushort)aggregate.HeaderLength),
+                        checked((ushort)aggregate.GsoSize),
+                        checked((ushort)aggregate.TcpOffset),
+                        16);
+                    WritePacket(
+                        fd,
+                        _gsoAggregateBuffer.AsSpan(0, aggregate.Length),
+                        header,
+                        cancellationToken);
+                    index += aggregate.SegmentCount;
+                    continue;
+                }
+
+                WritePacket(fd, packets[index].Span, VirtioNetHeader.None, cancellationToken);
+                index++;
+            }
+        }
+
+        return ValueTask.CompletedTask;
+    }
+
+    private unsafe void WritePacket(
+        int fd,
+        ReadOnlySpan<byte> packet,
+        VirtioNetHeader header,
+        CancellationToken cancellationToken)
+    {
+        if (packet.IsEmpty)
+        {
+            return;
+        }
+
+        if (_vnetHeaderSize <= 0)
+        {
+            WriteLegacyPacket(fd, packet, cancellationToken);
+            return;
+        }
+
+        Span<byte> headerBytes = stackalloc byte[LinuxTunGso.VirtioHeaderSize];
+        var vectors = stackalloc IoVector[2];
+        LinuxTunGso.WriteHeader(headerBytes, header);
+        while (true)
+        {
+            nint written;
+            fixed (byte* headerPointer = headerBytes)
+            fixed (byte* packetPointer = packet)
+            {
+                vectors[0].Base = (IntPtr)headerPointer;
+                vectors[0].Length = LinuxTunGso.VirtioHeaderSize;
+                vectors[1].Base = (IntPtr)packetPointer;
+                vectors[1].Length = (nuint)packet.Length;
+                written = writev(fd, vectors, 2);
             }
 
+            if (written > 0)
+            {
+                if (written != LinuxTunGso.VirtioHeaderSize + packet.Length)
+                {
+                    throw new IOException($"Partial TUN write for '{Name}': wrote {written} of {LinuxTunGso.VirtioHeaderSize + packet.Length} bytes.");
+                }
+
+                return;
+            }
+
+            var error = Marshal.GetLastPInvokeError();
+            if (written < 0 && error == EINTR)
+            {
+                continue;
+            }
+
+            if (written < 0 && error == EAGAIN)
+            {
+                if (!WaitForEvent(fd, POLLOUT, cancellationToken))
+                {
+                    return;
+                }
+
+                continue;
+            }
+
+            throw new IOException($"Failed to write virtio-net frame to Linux TUN device '{Name}'. errno={error}.");
+        }
+    }
+
+    private void WriteLegacyPacket(int fd, ReadOnlySpan<byte> packet, CancellationToken cancellationToken)
+    {
+        var offset = 0;
+        while (offset < packet.Length)
+        {
             nint written;
             unsafe
             {
-                fixed (byte* pointer = buffer)
+                fixed (byte* pointer = packet)
                 {
-                    written = write(fd, pointer + offset, (nuint)(buffer.Length - offset));
+                    written = write(fd, pointer + offset, (nuint)(packet.Length - offset));
                 }
             }
 
@@ -157,15 +342,23 @@ internal sealed partial class LinuxTunDevice : ITunDevice
             }
 
             var error = Marshal.GetLastPInvokeError();
-            if (written < 0 && error is EINTR or EAGAIN)
+            if (written < 0 && error == EINTR)
             {
+                continue;
+            }
+
+            if (written < 0 && error == EAGAIN)
+            {
+                if (!WaitForEvent(fd, POLLOUT, cancellationToken))
+                {
+                    return;
+                }
+
                 continue;
             }
 
             throw new IOException($"Failed to write to Linux TUN device '{Name}'. errno={error}.");
         }
-
-        return ValueTask.CompletedTask;
     }
 
     public void Dispose()
@@ -196,14 +389,15 @@ internal sealed partial class LinuxTunDevice : ITunDevice
 
     private void ReadLoop(CancellationToken cancellationToken)
     {
-        var buffer = new byte[MaxPacketSize];
+        var buffer = GC.AllocateUninitializedArray<byte>(MaxPacketSize + LinuxTunGso.VirtioHeaderSize);
+        var segmentRanges = GC.AllocateUninitializedArray<GsoSegment>((MaxPacketSize / 64) + 2);
 
         while (!cancellationToken.IsCancellationRequested)
         {
             try
             {
                 var fd = Volatile.Read(ref _fileDescriptor);
-                if (fd < 0 || !WaitForEvent(fd, POLLIN, cancellationToken))
+                if (fd < 0)
                 {
                     return;
                 }
@@ -219,9 +413,63 @@ internal sealed partial class LinuxTunDevice : ITunDevice
 
                 if (length > 0)
                 {
-                    var packet = new byte[(int)length];
-                    Buffer.BlockCopy(buffer, 0, packet, 0, packet.Length);
-                    PacketReceived?.Invoke(this, new TunPacketReceivedEventArgs(packet));
+                    if (_vnetHeaderSize <= 0)
+                    {
+                        PacketReceived?.Invoke(this, new TunPacketReceivedEventArgs(buffer.AsMemory(0, checked((int)length))));
+                        continue;
+                    }
+
+                    if (!LinuxTunGso.TryParseFrame(
+                        buffer.AsSpan(0, checked((int)length)),
+                        out var header,
+                        out var payload))
+                    {
+                        Log(ProxyNetworkerLogLevel.Warning, "Dropped a malformed Linux TUN virtio-net frame.");
+                        continue;
+                    }
+
+                    if ((header.GsoType & ~LinuxTunGso.GsoEcn) == 0)
+                    {
+                        if (!LinuxTunGso.TryCompleteChecksum(
+                            buffer.AsSpan(LinuxTunGso.VirtioHeaderSize, checked((int)length) - LinuxTunGso.VirtioHeaderSize),
+                            header))
+                        {
+                            if ((header.Flags & LinuxTunGso.FlagNeedsChecksum) != 0)
+                            {
+                                Log(ProxyNetworkerLogLevel.Warning, "Dropped a Linux TUN packet with malformed checksum metadata.");
+                                continue;
+                            }
+                        }
+
+                        PacketReceived?.Invoke(
+                            this,
+                            new TunPacketReceivedEventArgs(
+                                buffer.AsMemory(LinuxTunGso.VirtioHeaderSize, checked((int)length) - LinuxTunGso.VirtioHeaderSize)));
+                        continue;
+                    }
+
+                    if ((header.GsoType & ~LinuxTunGso.GsoEcn) != LinuxTunGso.GsoTcpV4 ||
+                        !LinuxTunGso.TrySegmentTcpV4(
+                            payload,
+                            header.GsoSize,
+                            _gsoSegmentBuffer,
+                            segmentRanges,
+                            out var segmentCount))
+                    {
+                        Log(
+                            ProxyNetworkerLogLevel.Warning,
+                            $"Dropped unsupported Linux TUN GSO frame (type=0x{header.GsoType:x2}, size={header.GsoSize}).");
+                        continue;
+                    }
+
+                    for (var index = 0; index < segmentCount; index++)
+                    {
+                        var segment = segmentRanges[index];
+                        PacketReceived?.Invoke(
+                            this,
+                            new TunPacketReceivedEventArgs(_gsoSegmentBuffer.AsMemory(segment.Offset, segment.Length)));
+                    }
+
                     continue;
                 }
 
@@ -231,8 +479,18 @@ internal sealed partial class LinuxTunDevice : ITunDevice
                 }
 
                 var error = Marshal.GetLastPInvokeError();
-                if (error is EINTR or EAGAIN)
+                if (error == EINTR)
                 {
+                    continue;
+                }
+
+                if (error == EAGAIN)
+                {
+                    if (!WaitForEvent(fd, POLLIN, cancellationToken))
+                    {
+                        return;
+                    }
+
                     continue;
                 }
 
@@ -312,6 +570,14 @@ internal sealed partial class LinuxTunDevice : ITunDevice
         {
             throw new ArgumentException("Linux interface names can only contain letters, digits, '_', '-' and '.'.", nameof(name));
         }
+    }
+
+    private static bool IsEnvironmentFlagEnabled(string name)
+    {
+        var value = Environment.GetEnvironmentVariable(name);
+        return string.Equals(value, "1", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(value, "true", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(value, "yes", StringComparison.OrdinalIgnoreCase);
     }
 
     private static TunDeviceOptions CloneWithName(TunDeviceOptions options, string name)
@@ -419,11 +685,24 @@ internal sealed partial class LinuxTunDevice : ITunDevice
         public short ReturnedEvents;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct IoVector
+    {
+        public IntPtr Base;
+        public nuint Length;
+    }
+
     [LibraryImport("libc", EntryPoint = "open", StringMarshalling = StringMarshalling.Utf8, SetLastError = true)]
     private static partial int open(string pathname, int flags);
 
     [LibraryImport("libc", EntryPoint = "ioctl", SetLastError = true)]
     private static partial int ioctl(int fd, ulong request, ref IfReq ifr);
+
+    [LibraryImport("libc", EntryPoint = "ioctl", SetLastError = true)]
+    private static partial int ioctlInt(int fd, ulong request, ref int value);
+
+    [LibraryImport("libc", EntryPoint = "ioctl", SetLastError = true)]
+    private static partial int ioctlValue(int fd, ulong request, nuint value);
 
     [LibraryImport("libc", EntryPoint = "poll", SetLastError = true)]
     private static partial int poll(ref PollFileDescriptor fds, nuint count, int timeout);
@@ -433,6 +712,9 @@ internal sealed partial class LinuxTunDevice : ITunDevice
 
     [LibraryImport("libc", EntryPoint = "write", SetLastError = true)]
     private static unsafe partial nint write(int fd, byte* buffer, nuint count);
+
+    [LibraryImport("libc", EntryPoint = "writev", SetLastError = true)]
+    private static unsafe partial nint writev(int fd, IoVector* vectors, int count);
 
     [LibraryImport("libc", EntryPoint = "close", SetLastError = true)]
     private static partial int close(int fd);

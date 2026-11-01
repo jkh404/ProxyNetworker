@@ -18,6 +18,8 @@ public sealed class VirtualNetworkRecord
 
     public string TransportProtocol { get; set; } = "udp";
 
+    public bool EncryptionEnabled { get; set; } = true;
+
     public bool IsEnabled { get; set; } = true;
 
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;

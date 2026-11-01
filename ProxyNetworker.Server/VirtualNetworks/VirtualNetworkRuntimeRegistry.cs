@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Net;
+using System.Net.Sockets;
 using System.Security.Cryptography;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
@@ -45,6 +46,13 @@ public sealed class VirtualNetworkRuntimeRegistry : IDisposable
             : Array.Empty<VirtualNetworkPeerSnapshot>();
     }
 
+    public VirtualNetworkTopologySnapshot? GetTopologySnapshot(string networkId)
+    {
+        return _networks.TryGetValue(networkId, out var runtime)
+            ? runtime.Relay.GetTopologySnapshot()
+            : null;
+    }
+
     public async Task<TunnelSummary> EnsureRunningAsync(VirtualNetworkRecord definition, CancellationToken cancellationToken)
     {
         if (!definition.IsEnabled)
@@ -65,30 +73,39 @@ public sealed class VirtualNetworkRuntimeRegistry : IDisposable
                 return existing.Summary;
             }
 
-            var runtime = await StartAsync(definition, cancellationToken).ConfigureAwait(false);
-            using (var scope = _scopeFactory.CreateScope())
-            {
-                var db = scope.ServiceProvider.GetRequiredService<ProxyNetworkerDbContext>();
-                var bans = await db.VirtualNetworkNodeBans
-                    .AsNoTracking()
-                    .Where(item => item.NetworkId == definition.Id)
-                    .Select(item => item.VirtualAddress)
-                    .ToArrayAsync(cancellationToken)
-                    .ConfigureAwait(false);
-                foreach (var address in bans)
-                {
-                    if (IPAddress.TryParse(address, out var bannedAddress))
-                    {
-                        runtime.Relay.SetPeerBanned(bannedAddress, true);
-                    }
-                }
-            }
+            var runtime = await StartRuntimeAsync(definition, cancellationToken).ConfigureAwait(false);
             if (!_networks.TryAdd(definition.Id, runtime))
             {
                 runtime.Relay.Dispose();
                 return _networks[definition.Id].Summary;
             }
 
+            return runtime.Summary;
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    public async Task<TunnelSummary> RestartAsync(VirtualNetworkRecord definition, CancellationToken cancellationToken)
+    {
+        if (!definition.IsEnabled)
+        {
+            throw new InvalidOperationException("Virtual Network is disabled.");
+        }
+
+        var gate = _locks.GetOrAdd(definition.Id, static _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (_networks.TryRemove(definition.Id, out var existing))
+            {
+                existing.Relay.Dispose();
+            }
+
+            var runtime = await StartRuntimeAsync(definition, cancellationToken).ConfigureAwait(false);
+            _networks[definition.Id] = runtime;
             return runtime.Summary;
         }
         finally
@@ -109,11 +126,20 @@ public sealed class VirtualNetworkRuntimeRegistry : IDisposable
         return false;
     }
 
-    public void Stop(string networkId)
+    public async Task StopAsync(string networkId, CancellationToken cancellationToken = default)
     {
-        if (_networks.TryRemove(networkId, out var runtime))
+        var gate = _locks.GetOrAdd(networkId, static _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
         {
-            runtime.Relay.Dispose();
+            if (_networks.TryRemove(networkId, out var runtime))
+            {
+                runtime.Relay.Dispose();
+            }
+        }
+        finally
+        {
+            gate.Release();
         }
     }
 
@@ -296,6 +322,39 @@ public sealed class VirtualNetworkRuntimeRegistry : IDisposable
         return result;
     }
 
+    private async Task<ActiveVirtualNetwork> StartRuntimeAsync(VirtualNetworkRecord definition, CancellationToken cancellationToken)
+    {
+        const int maxAttempts = 20;
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                var runtime = await StartAsync(definition, cancellationToken).ConfigureAwait(false);
+                using var scope = _scopeFactory.CreateScope();
+                var db = scope.ServiceProvider.GetRequiredService<ProxyNetworkerDbContext>();
+                var bans = await db.VirtualNetworkNodeBans
+                    .AsNoTracking()
+                    .Where(item => item.NetworkId == definition.Id)
+                    .Select(item => item.VirtualAddress)
+                    .ToArrayAsync(cancellationToken)
+                    .ConfigureAwait(false);
+                foreach (var address in bans)
+                {
+                    if (IPAddress.TryParse(address, out var bannedAddress))
+                    {
+                        runtime.Relay.SetPeerBanned(bannedAddress, true);
+                    }
+                }
+
+                return runtime;
+            }
+            catch (SocketException) when (attempt < maxAttempts)
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(150), cancellationToken).ConfigureAwait(false);
+            }
+        }
+    }
+
     private async Task<ActiveVirtualNetwork> StartAsync(VirtualNetworkRecord definition, CancellationToken cancellationToken)
     {
         var gatewayAddress = IPAddress.Parse(definition.GatewayAddress);
@@ -306,28 +365,38 @@ public sealed class VirtualNetworkRuntimeRegistry : IDisposable
             NodeAddress = gatewayAddress,
             PrefixLength = definition.PrefixLength,
             NodeName = definition.Name,
-            AuthenticationKey = authenticationKey
+            AuthenticationKey = authenticationKey,
+            EncryptionEnabled = definition.EncryptionEnabled
         };
         var transportProtocol = VirtualNetworkTransportProtocols.Normalize(definition.TransportProtocol);
         IVirtualNetworkRelay relay = VirtualNetworkTransportProtocols.UsesReliableStream(transportProtocol)
             ? new VirtualNetworkStreamRelay(options, transportProtocol, LogCoreEntry)
             : new VirtualNetworkRelay(options, LogCoreEntry);
 
-        await relay.StartAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await relay.StartAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            relay.Dispose();
+            throw;
+        }
 
         var summary = new TunnelSummary(
             definition.Id,
             definition.Name,
             "virtual-network",
-            "udp",
+            transportProtocol,
             $"{_publicListenAddress}:{definition.ListenPort}",
             null,
             DateTimeOffset.UtcNow,
             "running");
 
         _logger.LogInformation(
-            "Virtual Network {NetworkName} relay is running on UDP {PublicListenAddress}:{ListenPort} with gateway {GatewayAddress}/{PrefixLength}.",
+            "Virtual Network {NetworkName} relay is running on {TransportProtocol} {PublicListenAddress}:{ListenPort} with gateway {GatewayAddress}/{PrefixLength}.",
             definition.Name,
+            transportProtocol.ToUpperInvariant(),
             _publicListenAddress,
             definition.ListenPort,
             definition.GatewayAddress,

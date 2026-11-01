@@ -13,6 +13,8 @@ public sealed class CreateVirtualNetworkDefinitionRequest
     public int Mtu { get; set; }
 
     public string TransportProtocol { get; set; } = ProxyNetworker.Core.VirtualNetworkTransportProtocols.Udp;
+
+    public bool EncryptionEnabled { get; set; } = true;
 }
 
 public sealed record VirtualNetworkDefinitionResponse(
@@ -24,12 +26,28 @@ public sealed record VirtualNetworkDefinitionResponse(
     int ListenPort,
     int Mtu,
     string TransportProtocol,
+    bool EncryptionEnabled,
     bool IsEnabled,
     DateTimeOffset CreatedAt);
 
 public sealed class SetVirtualNetworkEnabledRequest
 {
     public bool Enabled { get; set; }
+}
+
+public sealed class SetVirtualNetworkProtocolRequest
+{
+    public string TransportProtocol { get; set; } = ProxyNetworker.Core.VirtualNetworkTransportProtocols.Udp;
+}
+
+public sealed class SetVirtualNetworkEncryptionRequest
+{
+    public bool EncryptionEnabled { get; set; } = true;
+}
+
+public sealed class UpdateVirtualNetworkTokenAddressRequest
+{
+    public string VirtualAddress { get; set; } = string.Empty;
 }
 
 public sealed class BanVirtualNetworkNodeRequest
@@ -81,7 +99,12 @@ public sealed record AccessTokenResponse(
     DateTimeOffset? ValidUntil,
     bool IsConsumed,
     bool HasStoredValue,
+    string AssignedVirtualAddress,
     DateTimeOffset CreatedAt);
+
+public sealed record VirtualNetworkTokenAddressResponse(
+    string TokenId,
+    string VirtualAddress);
 
 public sealed record CreatedAccessTokenResponse(
     AccessTokenResponse Token,
@@ -128,6 +151,46 @@ public sealed record VirtualNetworkStatusResponse(
     AccessTokenResponse[] Tokens,
     VirtualNetworkSessionResponse[] RecentSessions,
     VirtualNetworkNodeBanResponse[] BannedNodes);
+
+public sealed record VirtualNetworkTopologyNodeResponse(
+    string VirtualAddress,
+    string Role,
+    string NodeName,
+    string MachineName,
+    string OsDescription,
+    string OsArchitecture,
+    string ProcessArchitecture,
+    string ClientVersion,
+    bool IsOnline,
+    string TokenId,
+    string TokenPreview,
+    long BytesSent,
+    long BytesReceived,
+    DateTimeOffset? ConnectedAt,
+    DateTimeOffset? LastSeenAt);
+
+public sealed record VirtualNetworkTopologyEdgeResponse(
+    string SourceAddress,
+    string DestinationAddress,
+    string ConnectionType,
+    string TransportProtocol,
+    double? RttMilliseconds,
+    double? JitterMilliseconds,
+    double? LossPercent,
+    int? CostMilliseconds,
+    long BytesSent,
+    long BytesReceived,
+    double BytesPerSecondSent,
+    double BytesPerSecondReceived,
+    DateTimeOffset LastSeenAt);
+
+public sealed record VirtualNetworkTopologyResponse(
+    bool IsEnabled,
+    string GatewayAddress,
+    string TransportProtocol,
+    DateTimeOffset CapturedAt,
+    VirtualNetworkTopologyNodeResponse[] Nodes,
+    VirtualNetworkTopologyEdgeResponse[] Edges);
 
 public sealed record VirtualNetworkNodeBanResponse(
     string Id,

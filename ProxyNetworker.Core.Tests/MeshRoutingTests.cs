@@ -66,6 +66,24 @@ public sealed class MeshRoutingTests
     }
 
     [Fact]
+    public void MeshTrafficReportRoundTrips()
+    {
+        var report = new VirtualNetworkMeshTrafficReport(
+            73,
+            [
+                new VirtualNetworkMeshTraffic(IPAddress.Parse("10.66.0.3"), 123456, 654321),
+                new VirtualNetworkMeshTraffic(IPAddress.Parse("10.66.0.4"), 42, 24)
+            ]);
+
+        Assert.True(VirtualNetworkMeshTrafficReport.TryDecode(report.Encode(), out var decoded));
+        Assert.Equal(73, decoded.Sequence);
+        Assert.Equal(2, decoded.Links.Count);
+        Assert.Equal(IPAddress.Parse("10.66.0.3"), decoded.Links[0].VirtualAddress);
+        Assert.Equal(123456, decoded.Links[0].BytesSent);
+        Assert.Equal(654321, decoded.Links[0].BytesReceived);
+    }
+
+    [Fact]
     public void MeshPacketRejectsForwardingPastHopLimit()
     {
         var payload = VirtualNetworkMeshPacket.Create(IPAddress.Parse("10.66.0.4"), [0x45, 0, 0, 20]);

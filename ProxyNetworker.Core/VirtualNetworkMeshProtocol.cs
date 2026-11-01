@@ -117,6 +117,89 @@ internal sealed class VirtualNetworkMeshAdvertisement
     }
 }
 
+internal sealed record VirtualNetworkMeshTraffic(
+    IPAddress VirtualAddress,
+    long BytesSent,
+    long BytesReceived);
+
+internal sealed class VirtualNetworkMeshTrafficReport
+{
+    private const byte CurrentVersion = 1;
+    private const int MaxEntries = 64;
+    private const int HeaderSize = 10;
+    private const int EntrySize = 20;
+
+    public VirtualNetworkMeshTrafficReport(long sequence, IReadOnlyCollection<VirtualNetworkMeshTraffic> links)
+    {
+        Sequence = sequence;
+        Links = links.ToArray();
+    }
+
+    public long Sequence { get; }
+
+    public IReadOnlyList<VirtualNetworkMeshTraffic> Links { get; }
+
+    public byte[] Encode()
+    {
+        var normalized = Links
+            .Where(static link => link.VirtualAddress.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+            .DistinctBy(static link => link.VirtualAddress.ToString(), StringComparer.OrdinalIgnoreCase)
+            .Take(MaxEntries)
+            .ToArray();
+
+        var payload = new byte[HeaderSize + normalized.Length * EntrySize];
+        payload[0] = CurrentVersion;
+        BinaryPrimitives.WriteInt64BigEndian(payload.AsSpan(1, 8), Sequence);
+        payload[9] = (byte)normalized.Length;
+
+        var offset = HeaderSize;
+        foreach (var link in normalized)
+        {
+            link.VirtualAddress.GetAddressBytes().CopyTo(payload.AsSpan(offset, 4));
+            BinaryPrimitives.WriteInt64BigEndian(payload.AsSpan(offset + 4, 8), Math.Max(0, link.BytesSent));
+            BinaryPrimitives.WriteInt64BigEndian(payload.AsSpan(offset + 12, 8), Math.Max(0, link.BytesReceived));
+            offset += EntrySize;
+        }
+
+        return payload;
+    }
+
+    public static bool TryDecode(
+        ReadOnlySpan<byte> payload,
+        out VirtualNetworkMeshTrafficReport report)
+    {
+        report = null!;
+        if (payload.Length < HeaderSize || payload[0] != CurrentVersion)
+        {
+            return false;
+        }
+
+        var sequence = BinaryPrimitives.ReadInt64BigEndian(payload.Slice(1, 8));
+        var count = payload[9];
+        if (count > MaxEntries || payload.Length != HeaderSize + count * EntrySize)
+        {
+            return false;
+        }
+
+        var links = new VirtualNetworkMeshTraffic[count];
+        var offset = HeaderSize;
+        for (var index = 0; index < count; index++)
+        {
+            var address = new IPAddress(payload.Slice(offset, 4));
+            var bytesSent = BinaryPrimitives.ReadInt64BigEndian(payload.Slice(offset + 4, 8));
+            var bytesReceived = BinaryPrimitives.ReadInt64BigEndian(payload.Slice(offset + 12, 8));
+            links[index] = new VirtualNetworkMeshTraffic(
+                address,
+                Math.Max(0, bytesSent),
+                Math.Max(0, bytesReceived));
+            offset += EntrySize;
+        }
+
+        report = new VirtualNetworkMeshTrafficReport(sequence, links);
+        return true;
+    }
+}
+
 internal readonly struct VirtualNetworkMeshPacket
 {
     private const byte CurrentVersion = 1;

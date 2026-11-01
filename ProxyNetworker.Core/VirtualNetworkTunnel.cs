@@ -1,6 +1,8 @@
+using System.Buffers;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
+using ProxyNetworker.Core.Platforms.Linux;
 
 namespace ProxyNetworker.Core;
 
@@ -19,8 +21,10 @@ public sealed class VirtualNetworkTunnel : IDisposable
     private readonly Dictionary<string, DateTimeOffset> _directPathCooldownByAddress = new(StringComparer.OrdinalIgnoreCase);
     private VirtualNetworkMeshRouteTable _meshRoutes = VirtualNetworkMeshRouteTable.Empty;
     private long _meshAdvertisementSequence;
+    private long _meshTrafficReportSequence;
     private DateTimeOffset _globalDirectPathCooldownUntil;
     private UdpClient? _udpClient;
+    private LinuxUdpBatchSocket? _linuxUdpBatchSocket;
     private IPEndPoint? _remoteEndPoint;
     private CancellationTokenSource? _runtimeCancellation;
     private Task? _receiveLoop;
@@ -75,12 +79,18 @@ public sealed class VirtualNetworkTunnel : IDisposable
         try
         {
             _udpClient = new UdpClient(_options.BindEndPoint);
+            _linuxUdpBatchSocket = LinuxUdpBatchSocket.TryCreate(
+                _udpClient.Client,
+                _options.MaxPacketSize,
+                _logger);
             _runtimeCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             _tunDevice.PacketReceived += OnTunPacketReceived;
 
             await _tunDevice.StartAsync(cancellationToken).ConfigureAwait(false);
 
-            _receiveLoop = Task.Run(() => ReceiveLoopAsync(_runtimeCancellation.Token));
+            _receiveLoop = Task.Run(() => _linuxUdpBatchSocket is null
+                ? ReceiveLoopAsync(_runtimeCancellation.Token)
+                : ReceiveLoopBatchAsync(_linuxUdpBatchSocket, _runtimeCancellation.Token));
             _heartbeatLoop = Task.Run(() => HeartbeatLoopAsync(_runtimeCancellation.Token));
 
             if (!IsServer)
@@ -91,6 +101,7 @@ public sealed class VirtualNetworkTunnel : IDisposable
                 {
                     await SendLocalCandidatesAsync(cancellationToken).ConfigureAwait(false);
                     await SendMeshLinkStateAsync(cancellationToken).ConfigureAwait(false);
+                    await SendMeshTrafficReportAsync(cancellationToken).ConfigureAwait(false);
                 }
                 else
                 {
@@ -106,6 +117,8 @@ public sealed class VirtualNetworkTunnel : IDisposable
             Interlocked.Exchange(ref _started, 0);
             _tunDevice.PacketReceived -= OnTunPacketReceived;
             _udpClient?.Dispose();
+            _linuxUdpBatchSocket?.Dispose();
+            _linuxUdpBatchSocket = null;
             _udpClient = null;
             _runtimeCancellation?.Dispose();
             _runtimeCancellation = null;
@@ -120,6 +133,8 @@ public sealed class VirtualNetworkTunnel : IDisposable
             _tunDevice.PacketReceived -= OnTunPacketReceived;
             _runtimeCancellation?.Cancel();
             _udpClient?.Dispose();
+            _linuxUdpBatchSocket?.Dispose();
+            _linuxUdpBatchSocket = null;
 
             try
             {
@@ -138,6 +153,8 @@ public sealed class VirtualNetworkTunnel : IDisposable
 
     private async Task ReceiveLoopAsync(CancellationToken cancellationToken)
     {
+        var datagram = GC.AllocateUninitializedArray<byte>(_options.MaxPacketSize);
+        var anyEndPoint = new IPEndPoint(IPAddress.Any, 0);
         while (!cancellationToken.IsCancellationRequested)
         {
             try
@@ -148,15 +165,20 @@ public sealed class VirtualNetworkTunnel : IDisposable
                     return;
                 }
 
-                var received = await udpClient.ReceiveAsync().ConfigureAwait(false);
-                if (received.Buffer.Length == 0 || received.Buffer.Length > _options.MaxPacketSize)
+                var received = await udpClient.Client.ReceiveFromAsync(
+                    datagram.AsMemory(),
+                    SocketFlags.None,
+                    anyEndPoint,
+                    cancellationToken).ConfigureAwait(false);
+                if (received.ReceivedBytes == 0 || received.ReceivedBytes > _options.MaxPacketSize)
                 {
                     continue;
                 }
 
-                if (!VirtualNetworkFrame.TryParse(received.Buffer, _options.AuthenticationKey, out var frame))
+                var remoteEndPoint = (IPEndPoint)received.RemoteEndPoint;
+                if (!VirtualNetworkFrame.TryParse(datagram, received.ReceivedBytes, _options.AuthenticationKey, _options.EncryptionEnabled, out var frame))
                 {
-                    Log(ProxyNetworkerLogLevel.Warning, $"Ignored malformed Virtual Network datagram from {received.RemoteEndPoint}.");
+                    Log(ProxyNetworkerLogLevel.Warning, $"Ignored malformed Virtual Network datagram from {remoteEndPoint}.");
                     continue;
                 }
 
@@ -164,11 +186,11 @@ public sealed class VirtualNetworkTunnel : IDisposable
 
                 if (IsServer)
                 {
-                    await HandleServerFrameAsync(frame, received.RemoteEndPoint, cancellationToken).ConfigureAwait(false);
+                    await HandleServerFrameAsync(frame, remoteEndPoint, cancellationToken).ConfigureAwait(false);
                 }
-                else if (IsConfiguredServer(received.RemoteEndPoint))
+                else if (IsConfiguredServer(remoteEndPoint))
                 {
-                    await HandleClientFrameAsync(frame, received.RemoteEndPoint, cancellationToken).ConfigureAwait(false);
+                    await HandleClientFrameAsync(frame, remoteEndPoint, cancellationToken).ConfigureAwait(false);
                 }
                 else if (!_options.EnableDirectPaths)
                 {
@@ -176,7 +198,7 @@ public sealed class VirtualNetworkTunnel : IDisposable
                 }
                 else
                 {
-                    await HandleDirectFrameAsync(frame, received.RemoteEndPoint, cancellationToken).ConfigureAwait(false);
+                    await HandleDirectFrameAsync(frame, remoteEndPoint, cancellationToken).ConfigureAwait(false);
                 }
             }
             catch (ObjectDisposedException) when (cancellationToken.IsCancellationRequested)
@@ -198,6 +220,83 @@ public sealed class VirtualNetworkTunnel : IDisposable
             catch (Exception ex)
             {
                 Log(ProxyNetworkerLogLevel.Error, "Virtual Network receive loop failed.", ex);
+                return;
+            }
+        }
+    }
+
+    private async Task ReceiveLoopBatchAsync(LinuxUdpBatchSocket transport, CancellationToken cancellationToken)
+    {
+        var tunBatch = new TunPacketBatch();
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                var count = transport.ReceiveBatch(cancellationToken);
+                if (count == 0)
+                {
+                    continue;
+                }
+
+                for (var index = 0; index < count; index++)
+                {
+                    var received = transport.GetReceived(index);
+                    if (received.Length == 0 || received.Length > _options.MaxPacketSize)
+                    {
+                        continue;
+                    }
+
+                    if (!VirtualNetworkFrame.TryParse(
+                        received.Buffer,
+                        received.Length,
+                        _options.AuthenticationKey,
+                        _options.EncryptionEnabled,
+                        out var frame))
+                    {
+                        Log(ProxyNetworkerLogLevel.Warning, $"Ignored malformed Virtual Network datagram from {received.RemoteEndPoint}.");
+                        continue;
+                    }
+
+                    CleanupExpiredPeers();
+                    if (IsServer)
+                    {
+                        await HandleServerFrameAsync(frame, received.RemoteEndPoint, cancellationToken, tunBatch).ConfigureAwait(false);
+                    }
+                    else if (IsConfiguredServer(received.RemoteEndPoint))
+                    {
+                        await HandleClientFrameAsync(frame, received.RemoteEndPoint, cancellationToken, tunBatch).ConfigureAwait(false);
+                    }
+                    else if (!_options.EnableDirectPaths)
+                    {
+                        Log(ProxyNetworkerLogLevel.Debug, "Ignored direct Virtual Network datagram because relay-only mode is enabled.");
+                    }
+                    else
+                    {
+                        await HandleDirectFrameAsync(frame, received.RemoteEndPoint, cancellationToken, tunBatch).ConfigureAwait(false);
+                    }
+                }
+
+                await tunBatch.FlushAsync(_tunDevice, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (ObjectDisposedException) when (cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (SocketException) when (cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (IOException ex) when (cancellationToken.IsCancellationRequested && ex.Message.Contains("errno=9", StringComparison.Ordinal))
+            {
+                return;
+            }
+            catch (Exception ex)
+            {
+                Log(ProxyNetworkerLogLevel.Error, "Virtual Network batched receive loop failed.", ex);
                 return;
             }
         }
@@ -225,6 +324,7 @@ public sealed class VirtualNetworkTunnel : IDisposable
                     {
                         await ProbeDirectPeersAsync(cancellationToken).ConfigureAwait(false);
                         await SendMeshLinkStateAsync(cancellationToken).ConfigureAwait(false);
+                        await SendMeshTrafficReportAsync(cancellationToken).ConfigureAwait(false);
                     }
                 }
             }
@@ -243,7 +343,11 @@ public sealed class VirtualNetworkTunnel : IDisposable
         }
     }
 
-    private async Task HandleServerFrameAsync(VirtualNetworkFrame frame, IPEndPoint remoteEndPoint, CancellationToken cancellationToken)
+    private async Task HandleServerFrameAsync(
+        VirtualNetworkFrame frame,
+        IPEndPoint remoteEndPoint,
+        CancellationToken cancellationToken,
+        TunPacketBatch? tunBatch = null)
     {
         switch (frame.Type)
         {
@@ -257,12 +361,16 @@ public sealed class VirtualNetworkTunnel : IDisposable
                     ? parsedSource
                     : frame.VirtualAddress;
                 RegisterPeer(sourceAddress, remoteEndPoint);
-                await RoutePacketAsync(frame.Payload, remoteEndPoint, cancellationToken).ConfigureAwait(false);
+                RoutePacket(frame.Payload, remoteEndPoint, cancellationToken, tunBatch);
                 break;
         }
     }
 
-    private async Task HandleClientFrameAsync(VirtualNetworkFrame frame, IPEndPoint remoteEndPoint, CancellationToken cancellationToken)
+    private async Task HandleClientFrameAsync(
+        VirtualNetworkFrame frame,
+        IPEndPoint remoteEndPoint,
+        CancellationToken cancellationToken,
+        TunPacketBatch? tunBatch = null)
     {
         var configuredRemote = _options.RemoteEndPoint;
         if (configuredRemote is null || !EndPointEquals(configuredRemote, remoteEndPoint))
@@ -296,12 +404,12 @@ public sealed class VirtualNetworkTunnel : IDisposable
         }
         else if (frame.Type == VirtualNetworkFrameType.MeshPacket)
         {
-            await HandleMeshPacketAsync(frame, cancellationToken).ConfigureAwait(false);
+            await HandleMeshPacketAsync(frame, cancellationToken, tunBatch).ConfigureAwait(false);
         }
         else if (frame.Type == VirtualNetworkFrameType.Packet)
         {
             NotePathActivity(frame.VirtualAddress, remoteEndPoint);
-            await _tunDevice.SendAsync(frame.Payload, cancellationToken).ConfigureAwait(false);
+            await SendTunPacketAsync(frame.Payload, tunBatch, cancellationToken).ConfigureAwait(false);
         }
         else if (frame.Type == VirtualNetworkFrameType.PathProbe)
         {
@@ -311,7 +419,7 @@ public sealed class VirtualNetworkTunnel : IDisposable
                     VirtualNetworkFrameType.PathProbeAck,
                     _options.NodeAddress,
                     frame.Payload.Span,
-                    _options.AuthenticationKey);
+                    _options.AuthenticationKey, _options.EncryptionEnabled);
                 await SendFrameAsync(response, remoteEndPoint, cancellationToken).ConfigureAwait(false);
             }
         }
@@ -322,7 +430,11 @@ public sealed class VirtualNetworkTunnel : IDisposable
         }
     }
 
-    private async Task HandleDirectFrameAsync(VirtualNetworkFrame frame, IPEndPoint remoteEndPoint, CancellationToken cancellationToken)
+    private async Task HandleDirectFrameAsync(
+        VirtualNetworkFrame frame,
+        IPEndPoint remoteEndPoint,
+        CancellationToken cancellationToken,
+        TunPacketBatch? tunBatch = null)
     {
         var isKnownPath = frame.Type == VirtualNetworkFrameType.MeshPacket
             ? IsKnownDirectEndpoint(remoteEndPoint)
@@ -342,7 +454,7 @@ public sealed class VirtualNetworkTunnel : IDisposable
                         VirtualNetworkFrameType.PathProbeAck,
                         _options.NodeAddress,
                         frame.Payload.Span,
-                        _options.AuthenticationKey);
+                        _options.AuthenticationKey, _options.EncryptionEnabled);
                     await SendFrameAsync(response, remoteEndPoint, cancellationToken).ConfigureAwait(false);
                 }
                 break;
@@ -359,12 +471,18 @@ public sealed class VirtualNetworkTunnel : IDisposable
                 break;
 
             case VirtualNetworkFrameType.MeshPacket:
-                await HandleMeshPacketAsync(frame, cancellationToken).ConfigureAwait(false);
+                if (VirtualNetworkMeshPacket.TryParse(frame.Payload.Span, out var directMeshPacket))
+                {
+                    var linkAddress = FindDirectPeerAddressLocked(remoteEndPoint) ?? frame.VirtualAddress;
+                    RecordDirectTraffic(linkAddress, remoteEndPoint, 0, frame.Payload.Length);
+                }
+                await HandleMeshPacketAsync(frame, cancellationToken, tunBatch).ConfigureAwait(false);
                 break;
 
             case VirtualNetworkFrameType.Packet:
                 NotePathActivity(frame.VirtualAddress, remoteEndPoint);
-                await _tunDevice.SendAsync(frame.Payload, cancellationToken).ConfigureAwait(false);
+                RecordDirectTraffic(frame.VirtualAddress, remoteEndPoint, 0, frame.Payload.Length);
+                await SendTunPacketAsync(frame.Payload, tunBatch, cancellationToken).ConfigureAwait(false);
                 break;
         }
     }
@@ -384,7 +502,7 @@ public sealed class VirtualNetworkTunnel : IDisposable
             VirtualNetworkFrameType.PeerCandidates,
             _options.NodeAddress,
             payload,
-            _options.AuthenticationKey);
+            _options.AuthenticationKey, _options.EncryptionEnabled);
         await SendFrameAsync(frame, remoteEndPoint, cancellationToken).ConfigureAwait(false);
     }
 
@@ -404,7 +522,40 @@ public sealed class VirtualNetworkTunnel : IDisposable
             VirtualNetworkFrameType.MeshLinkState,
             _options.NodeAddress,
             advertisement.Encode(),
-            _options.AuthenticationKey);
+            _options.AuthenticationKey, _options.EncryptionEnabled);
+        await SendFrameAsync(frame, remoteEndPoint, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task SendMeshTrafficReportAsync(CancellationToken cancellationToken)
+    {
+        var remoteEndPoint = _options.RemoteEndPoint;
+        if (remoteEndPoint is null || !_options.EnableDirectPaths)
+        {
+            return;
+        }
+
+        VirtualNetworkMeshTraffic[] links;
+        lock (_peersLock)
+        {
+            links = _directPeersByAddress.Values
+                .Select(static state =>
+                {
+                    var paths = state.Paths.Values.Where(static path => !path.IsRelay).ToArray();
+                    return new VirtualNetworkMeshTraffic(
+                        state.VirtualAddress,
+                        paths.Aggregate(0L, static (total, path) => total + path.BytesSent),
+                        paths.Aggregate(0L, static (total, path) => total + path.BytesReceived));
+                })
+                .ToArray();
+        }
+
+        var sequence = Interlocked.Increment(ref _meshTrafficReportSequence);
+        var report = new VirtualNetworkMeshTrafficReport(sequence, links);
+        var frame = VirtualNetworkFrame.Create(
+            VirtualNetworkFrameType.MeshTrafficReport,
+            _options.NodeAddress,
+            report.Encode(),
+            _options.AuthenticationKey, _options.EncryptionEnabled);
         await SendFrameAsync(frame, remoteEndPoint, cancellationToken).ConfigureAwait(false);
     }
 
@@ -435,7 +586,10 @@ public sealed class VirtualNetworkTunnel : IDisposable
         }
     }
 
-    private async Task HandleMeshPacketAsync(VirtualNetworkFrame frame, CancellationToken cancellationToken)
+    private async Task HandleMeshPacketAsync(
+        VirtualNetworkFrame frame,
+        CancellationToken cancellationToken,
+        TunPacketBatch? tunBatch = null)
     {
         if (!VirtualNetworkMeshPacket.TryParse(frame.Payload.Span, out var meshPacket))
         {
@@ -445,7 +599,7 @@ public sealed class VirtualNetworkTunnel : IDisposable
 
         if (meshPacket.Destination.Equals(_options.NodeAddress))
         {
-            await _tunDevice.SendAsync(meshPacket.Payload, cancellationToken).ConfigureAwait(false);
+            await SendTunPacketAsync(meshPacket.Payload, tunBatch, cancellationToken).ConfigureAwait(false);
             return;
         }
 
@@ -455,14 +609,14 @@ public sealed class VirtualNetworkTunnel : IDisposable
             return;
         }
 
-        await SendMeshPacketAsync(
+        SendMeshPacket(
             frame.VirtualAddress,
             meshPacket.Destination,
             forwardedPayload,
-            cancellationToken).ConfigureAwait(false);
+            cancellationToken);
     }
 
-    private async Task SendRoutedPacketAsync(
+    private void SendRoutedPacket(
         ReadOnlyMemory<byte> packet,
         IPAddress destination,
         CancellationToken cancellationToken)
@@ -473,26 +627,27 @@ public sealed class VirtualNetworkTunnel : IDisposable
             var relay = _options.RemoteEndPoint;
             if (relay is not null)
             {
-                await SendPacketFrameAsync(packet, relay, cancellationToken).ConfigureAwait(false);
+                SendPacketFrame(packet, relay, cancellationToken);
             }
             return;
         }
 
         if (decision.IsRelay)
         {
-            await SendPacketFrameAsync(packet, decision.EndPoint, cancellationToken).ConfigureAwait(false);
+            SendPacketFrame(packet, decision.EndPoint, cancellationToken);
             return;
         }
 
         var meshPayload = VirtualNetworkMeshPacket.Create(destination, packet.Span);
-        await SendMeshPacketFrameAsync(
+        SendMeshPacketFrame(
             _options.NodeAddress,
             meshPayload,
             decision.EndPoint,
-            cancellationToken).ConfigureAwait(false);
+            cancellationToken);
+        RecordDirectTraffic(decision.NextHopAddress, decision.EndPoint, meshPayload.Length, 0);
     }
 
-    private async Task SendMeshPacketAsync(
+    private void SendMeshPacket(
         IPAddress sourceAddress,
         IPAddress destination,
         byte[] meshPayload,
@@ -504,25 +659,40 @@ public sealed class VirtualNetworkTunnel : IDisposable
             return;
         }
 
-        await SendMeshPacketFrameAsync(
+        SendMeshPacketFrame(
             sourceAddress,
             meshPayload,
             decision.EndPoint,
-            cancellationToken).ConfigureAwait(false);
+            cancellationToken);
+        if (!decision.IsRelay)
+        {
+            RecordDirectTraffic(decision.NextHopAddress, decision.EndPoint, meshPayload.Length, 0);
+        }
     }
 
-    private async Task SendMeshPacketFrameAsync(
+    private void SendMeshPacketFrame(
         IPAddress sourceAddress,
         byte[] meshPayload,
         IPEndPoint nextHopEndPoint,
         CancellationToken cancellationToken)
     {
-        var frame = VirtualNetworkFrame.Create(
-            VirtualNetworkFrameType.MeshPacket,
-            sourceAddress,
-            meshPayload,
-            _options.AuthenticationKey);
-        await SendFrameAsync(frame, nextHopEndPoint, cancellationToken).ConfigureAwait(false);
+        var frameLength = VirtualNetworkFrame.GetFrameLength(meshPayload.Length);
+        var frame = ArrayPool<byte>.Shared.Rent(frameLength);
+        try
+        {
+            VirtualNetworkFrame.CreateInto(
+                VirtualNetworkFrameType.MeshPacket,
+                sourceAddress,
+                meshPayload,
+                _options.AuthenticationKey,
+                _options.EncryptionEnabled,
+                frame.AsSpan(0, frameLength));
+            SendFrame(frame, frameLength, nextHopEndPoint, cancellationToken);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(frame);
+        }
     }
 
     private ForwardingDecision? SelectForwardingDecision(IPAddress destination)
@@ -537,7 +707,7 @@ public sealed class VirtualNetworkTunnel : IDisposable
                 {
                     return relayPath is null && _options.RemoteEndPoint is null
                         ? null
-                        : new ForwardingDecision(_options.RemoteEndPoint!, true, relayPath?.ScoreMilliseconds, "relay");
+                        : new ForwardingDecision(_options.RemoteEndPoint!, destination, true, relayPath?.ScoreMilliseconds, "relay");
                 }
             }
             else
@@ -563,7 +733,7 @@ public sealed class VirtualNetworkTunnel : IDisposable
                         $"Virtual Network {pathType} path selected for {destination} via {directPath.EndPoint} ({meshCost:0.0} ms; route {path}).");
                 }
 
-                return new ForwardingDecision(directPath.EndPoint, false, meshCost, path);
+                return new ForwardingDecision(directPath.EndPoint, nextHopAddress, false, meshCost, path);
             }
 
             var relay = _options.RemoteEndPoint;
@@ -578,7 +748,7 @@ public sealed class VirtualNetworkTunnel : IDisposable
                         $"Virtual Network relay path selected for {destination} via {relay} ({rtt}).");
                 }
 
-                return new ForwardingDecision(relay, true, relayScore, "relay");
+                return new ForwardingDecision(relay, destination, true, relayScore, "relay");
             }
         }
 
@@ -761,7 +931,7 @@ public sealed class VirtualNetworkTunnel : IDisposable
                 VirtualNetworkFrameType.PathProbe,
                 _options.NodeAddress,
                 payload,
-                _options.AuthenticationKey);
+                _options.AuthenticationKey, _options.EncryptionEnabled);
             try
             {
                 await SendFrameAsync(frame, probe.EndPoint, cancellationToken).ConfigureAwait(false);
@@ -945,6 +1115,46 @@ public sealed class VirtualNetworkTunnel : IDisposable
         }
     }
 
+    private void RecordDirectTraffic(IPAddress virtualAddress, IPEndPoint remoteEndPoint, long bytesSent, long bytesReceived)
+    {
+        lock (_peersLock)
+        {
+            if (!_directPeersByAddress.TryGetValue(AddressKey(virtualAddress), out var state))
+            {
+                return;
+            }
+
+            var path = GetOrCreatePathLocked(state, remoteEndPoint, isRelay: false);
+            path.BytesSent = SaturatingAdd(path.BytesSent, bytesSent);
+            path.BytesReceived = SaturatingAdd(path.BytesReceived, bytesReceived);
+            path.LastSuccess = DateTimeOffset.UtcNow;
+        }
+    }
+
+    private IPAddress? FindDirectPeerAddressLocked(IPEndPoint remoteEndPoint)
+    {
+        foreach (var state in _directPeersByAddress.Values)
+        {
+            if (state.Candidates.Any(candidate => EndPointEquals(candidate, remoteEndPoint)) ||
+                state.Paths.ContainsKey(EndPointKey(remoteEndPoint)))
+            {
+                return state.VirtualAddress;
+            }
+        }
+
+        return null;
+    }
+
+    private static long SaturatingAdd(long current, long value)
+    {
+        if (value <= 0)
+        {
+            return current;
+        }
+
+        return current > long.MaxValue - value ? long.MaxValue : current + value;
+    }
+
     private static PathMeasurement GetOrCreatePathLocked(PeerPathState state, IPEndPoint endPoint, bool isRelay)
     {
         var key = EndPointKey(endPoint);
@@ -1007,16 +1217,16 @@ public sealed class VirtualNetworkTunnel : IDisposable
 
     private void OnTunPacketReceived(object? sender, TunPacketReceivedEventArgs e)
     {
-        _ = HandleTunPacketAsync(e.Packet);
+        HandleTunPacket(e.PacketMemory);
     }
 
-    private async Task HandleTunPacketAsync(byte[] packet)
+    private void HandleTunPacket(ReadOnlyMemory<byte> packet)
     {
         try
         {
             if (IsServer)
             {
-                await RoutePacketAsync(packet, sourcePeer: null, CancellationToken.None).ConfigureAwait(false);
+                RoutePacket(packet, sourcePeer: null, CancellationToken.None);
                 return;
             }
 
@@ -1024,14 +1234,14 @@ public sealed class VirtualNetworkTunnel : IDisposable
             if (remoteEndPoint is not null)
             {
                 if (!_options.EnableDirectPaths ||
-                    !TryReadIPv4Destination(packet, out var destination) ||
+                    !TryReadIPv4Destination(packet.Span, out var destination) ||
                     IsBroadcastOrMulticast(destination))
                 {
-                    await SendPacketFrameAsync(packet, remoteEndPoint, CancellationToken.None).ConfigureAwait(false);
+                    SendPacketFrame(packet, remoteEndPoint, CancellationToken.None);
                     return;
                 }
 
-                await SendRoutedPacketAsync(packet, destination, CancellationToken.None).ConfigureAwait(false);
+                SendRoutedPacket(packet, destination, CancellationToken.None);
             }
         }
         catch (ObjectDisposedException)
@@ -1043,7 +1253,11 @@ public sealed class VirtualNetworkTunnel : IDisposable
         }
     }
 
-    private async Task RoutePacketAsync(ReadOnlyMemory<byte> packet, IPEndPoint? sourcePeer, CancellationToken cancellationToken)
+    private void RoutePacket(
+        ReadOnlyMemory<byte> packet,
+        IPEndPoint? sourcePeer,
+        CancellationToken cancellationToken,
+        TunPacketBatch? tunBatch = null)
     {
         if (!TryReadIPv4Destination(packet.Span, out var destination))
         {
@@ -1054,10 +1268,10 @@ public sealed class VirtualNetworkTunnel : IDisposable
         {
             if (sourcePeer is not null)
             {
-                await _tunDevice.SendAsync(packet, cancellationToken).ConfigureAwait(false);
+                SendTunPacketAsync(packet, tunBatch, cancellationToken).GetAwaiter().GetResult();
             }
 
-            await SendPacketToPeersAsync(packet, exceptPeer: sourcePeer, cancellationToken).ConfigureAwait(false);
+            SendPacketToPeers(packet, exceptPeer: sourcePeer, cancellationToken);
             return;
         }
 
@@ -1065,7 +1279,7 @@ public sealed class VirtualNetworkTunnel : IDisposable
         {
             if (sourcePeer is not null)
             {
-                await _tunDevice.SendAsync(packet, cancellationToken).ConfigureAwait(false);
+                SendTunPacketAsync(packet, tunBatch, cancellationToken).GetAwaiter().GetResult();
             }
 
             return;
@@ -1074,11 +1288,11 @@ public sealed class VirtualNetworkTunnel : IDisposable
         var peer = FindPeer(destination);
         if (peer is not null && !IsSamePeer(peer.EndPoint, sourcePeer))
         {
-            await SendPacketFrameAsync(packet, peer.EndPoint, cancellationToken).ConfigureAwait(false);
+            SendPacketFrame(packet, peer.EndPoint, cancellationToken);
         }
     }
 
-    private async Task SendPacketToPeersAsync(ReadOnlyMemory<byte> packet, IPEndPoint? exceptPeer, CancellationToken cancellationToken)
+    private void SendPacketToPeers(ReadOnlyMemory<byte> packet, IPEndPoint? exceptPeer, CancellationToken cancellationToken)
     {
         VirtualNetworkPeer[] peers;
         lock (_peersLock)
@@ -1093,7 +1307,7 @@ public sealed class VirtualNetworkTunnel : IDisposable
                 continue;
             }
 
-            await SendPacketFrameAsync(packet, peer.EndPoint, cancellationToken).ConfigureAwait(false);
+            SendPacketFrame(packet, peer.EndPoint, cancellationToken);
         }
     }
 
@@ -1101,7 +1315,7 @@ public sealed class VirtualNetworkTunnel : IDisposable
     {
         var nodeName = string.IsNullOrWhiteSpace(_options.NodeName) ? _options.NodeAddress.ToString() : _options.NodeName;
         var payload = VirtualNetworkNodeInfo.FromEnvironment(nodeName).Encode();
-        var frame = VirtualNetworkFrame.Create(type, _options.NodeAddress, payload, _options.AuthenticationKey);
+        var frame = VirtualNetworkFrame.Create(type, _options.NodeAddress, payload, _options.AuthenticationKey, _options.EncryptionEnabled);
         await SendFrameAsync(frame, remoteEndPoint, cancellationToken).ConfigureAwait(false);
     }
 
@@ -1117,18 +1331,59 @@ public sealed class VirtualNetworkTunnel : IDisposable
             VirtualNetworkFrameType.RelayRequired,
             _options.NodeAddress,
             [relayRequired ? (byte)1 : (byte)0],
-            _options.AuthenticationKey);
+            _options.AuthenticationKey, _options.EncryptionEnabled);
         await SendFrameAsync(frame, remoteEndPoint, cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task SendPacketFrameAsync(ReadOnlyMemory<byte> packet, IPEndPoint remoteEndPoint, CancellationToken cancellationToken)
+    private void SendPacketFrame(ReadOnlyMemory<byte> packet, IPEndPoint remoteEndPoint, CancellationToken cancellationToken)
     {
-        var frame = VirtualNetworkFrame.Create(VirtualNetworkFrameType.Packet, _options.NodeAddress, packet.Span, _options.AuthenticationKey);
-        await SendFrameAsync(frame, remoteEndPoint, cancellationToken).ConfigureAwait(false);
+        var frameLength = VirtualNetworkFrame.GetFrameLength(packet.Length);
+        var frame = ArrayPool<byte>.Shared.Rent(frameLength);
+        try
+        {
+            VirtualNetworkFrame.CreateInto(
+                VirtualNetworkFrameType.Packet,
+                _options.NodeAddress,
+                packet.Span,
+                _options.AuthenticationKey,
+                _options.EncryptionEnabled,
+                frame.AsSpan(0, frameLength));
+            SendFrame(frame, frameLength, remoteEndPoint, cancellationToken);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(frame);
+        }
+    }
+
+    private void SendFrame(byte[] frame, int frameLength, IPEndPoint remoteEndPoint, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var batchSocket = _linuxUdpBatchSocket;
+        if (batchSocket is not null)
+        {
+            batchSocket.Enqueue(frame.AsSpan(0, frameLength), remoteEndPoint);
+            return;
+        }
+
+        var udpClient = _udpClient;
+        if (udpClient is null)
+        {
+            return;
+        }
+
+        udpClient.Client.SendTo(frame, 0, frameLength, SocketFlags.None, remoteEndPoint);
     }
 
     private async Task SendFrameAsync(byte[] frame, IPEndPoint remoteEndPoint, CancellationToken cancellationToken)
     {
+        var batchSocket = _linuxUdpBatchSocket;
+        if (batchSocket is not null)
+        {
+            batchSocket.Enqueue(frame, remoteEndPoint);
+            return;
+        }
+
         var udpClient = _udpClient;
         if (udpClient is null)
         {
@@ -1144,6 +1399,20 @@ public sealed class VirtualNetworkTunnel : IDisposable
         {
             _sendLock.Release();
         }
+    }
+
+    private ValueTask SendTunPacketAsync(
+        ReadOnlyMemory<byte> packet,
+        TunPacketBatch? tunBatch,
+        CancellationToken cancellationToken)
+    {
+        if (tunBatch is not null)
+        {
+            tunBatch.Add(packet);
+            return ValueTask.CompletedTask;
+        }
+
+        return _tunDevice.SendAsync(packet, cancellationToken);
     }
 
     private void RegisterPeer(IPAddress virtualAddress, IPEndPoint remoteEndPoint)
@@ -1375,6 +1644,10 @@ public sealed class VirtualNetworkTunnel : IDisposable
 
         public int Received { get; set; }
 
+        public long BytesSent { get; set; }
+
+        public long BytesReceived { get; set; }
+
         public double ScoreMilliseconds => EwmaRttMs is null
             ? double.MaxValue
             : VirtualNetworkMeshLink.CalculateCost(
@@ -1387,6 +1660,7 @@ public sealed class VirtualNetworkTunnel : IDisposable
 
     private sealed record ForwardingDecision(
         IPEndPoint EndPoint,
+        IPAddress NextHopAddress,
         bool IsRelay,
         double? CostMilliseconds,
         string Path);

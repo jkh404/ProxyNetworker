@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Sockets;
+using ProxyNetworker.Core.Platforms.Linux;
 
 namespace ProxyNetworker.Core;
 
@@ -11,8 +12,11 @@ public sealed class VirtualNetworkRelay : IVirtualNetworkRelay
     private readonly object _peersLock = new();
     private readonly Dictionary<string, VirtualNetworkPeer> _peersByAddress = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _addressByEndpoint = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, MeshAdvertisementObservation> _meshAdvertisements = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, MeshTrafficObservation> _meshTrafficReports = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _bannedAddresses = new(StringComparer.OrdinalIgnoreCase);
     private UdpClient? _udpClient;
+    private LinuxUdpBatchSocket? _linuxUdpBatchSocket;
     private CancellationTokenSource? _runtimeCancellation;
     private Task? _receiveLoop;
     private Task? _cleanupLoop;
@@ -50,6 +54,8 @@ public sealed class VirtualNetworkRelay : IVirtualNetworkRelay
                 if (_peersByAddress.Remove(key, out var peer))
                 {
                     _addressByEndpoint.Remove(EndPointKey(peer.EndPoint));
+                    _meshAdvertisements.Remove(key);
+                    _meshTrafficReports.Remove(key);
                 }
             }
             else
@@ -70,6 +76,110 @@ public sealed class VirtualNetworkRelay : IVirtualNetworkRelay
         }
     }
 
+    public VirtualNetworkTopologySnapshot GetTopologySnapshot()
+    {
+        var capturedAt = DateTimeOffset.UtcNow;
+        var serverInfo = VirtualNetworkNodeInfo.FromEnvironment(
+            string.IsNullOrWhiteSpace(_options.NodeName) ? _options.NodeAddress.ToString() : _options.NodeName);
+        var nodes = new List<VirtualNetworkTopologyNodeSnapshot>
+        {
+            new(
+                _options.NodeAddress,
+                "server",
+                serverInfo.NodeName,
+                serverInfo.MachineName,
+                serverInfo.OsDescription,
+                serverInfo.OsArchitecture,
+                serverInfo.ProcessArchitecture,
+                serverInfo.ClientVersion,
+                true,
+                0,
+                0,
+                null,
+                capturedAt)
+        };
+        var edges = new List<VirtualNetworkTopologyEdgeSnapshot>();
+
+        lock (_peersLock)
+        {
+            foreach (var peer in _peersByAddress.Values)
+            {
+                peer.UpdateRates(capturedAt);
+                nodes.Add(peer.ToTopologyNode());
+                edges.Add(new VirtualNetworkTopologyEdgeSnapshot(
+                    _options.NodeAddress,
+                    peer.VirtualAddress,
+                    VirtualNetworkTopologyConnectionTypes.Relay,
+                    VirtualNetworkTransportProtocols.Udp,
+                    null,
+                    null,
+                    null,
+                    null,
+                    peer.BytesSent,
+                    peer.BytesReceived,
+                    peer.BytesPerSecondSent,
+                    peer.BytesPerSecondReceived,
+                    peer.LastSeen));
+            }
+
+            var onlineAddresses = _peersByAddress.Values
+                .Select(static peer => peer.VirtualAddress.ToString())
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var observedDirectLinks = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var observation in _meshAdvertisements.Values
+                .Where(item => capturedAt - item.ObservedAt <= _options.PeerTimeout)
+                .OrderByDescending(static item => item.ObservedAt))
+            {
+                VirtualNetworkMeshTrafficReport? trafficReport = null;
+                if (_meshTrafficReports.TryGetValue(AddressKey(observation.Origin), out var trafficObservation) &&
+                    capturedAt - trafficObservation.ObservedAt <= _options.PeerTimeout)
+                {
+                    trafficReport = trafficObservation.Telemetry;
+                }
+
+                foreach (var link in observation.Advertisement.Links)
+                {
+                    if (!onlineAddresses.Contains(link.VirtualAddress.ToString()))
+                    {
+                        continue;
+                    }
+
+                    var pairKey = string.Compare(observation.Origin.ToString(), link.VirtualAddress.ToString(), StringComparison.OrdinalIgnoreCase) < 0
+                        ? $"{observation.Origin}|{link.VirtualAddress}"
+                        : $"{link.VirtualAddress}|{observation.Origin}";
+                    if (!observedDirectLinks.Add(pairKey))
+                    {
+                        continue;
+                    }
+
+                    var traffic = trafficReport?.Links.FirstOrDefault(
+                        item => item.VirtualAddress.Equals(link.VirtualAddress));
+                    var trafficRate = trafficObservation?.Rates.GetValueOrDefault(AddressKey(link.VirtualAddress));
+                    edges.Add(new VirtualNetworkTopologyEdgeSnapshot(
+                        observation.Origin,
+                        link.VirtualAddress,
+                        VirtualNetworkTopologyConnectionTypes.Direct,
+                        VirtualNetworkTransportProtocols.Udp,
+                        link.RttMilliseconds,
+                        link.JitterMilliseconds,
+                        link.LossBasisPoints / 100d,
+                        link.CostMilliseconds,
+                        traffic?.BytesSent ?? 0,
+                        traffic?.BytesReceived ?? 0,
+                        trafficRate?.BytesSent ?? 0,
+                        trafficRate?.BytesReceived ?? 0,
+                        observation.ObservedAt));
+                }
+            }
+        }
+
+        return new VirtualNetworkTopologySnapshot(
+            VirtualNetworkTransportProtocols.Udp,
+            capturedAt,
+            nodes,
+            edges);
+    }
+
     public Task StartAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -82,8 +192,14 @@ public sealed class VirtualNetworkRelay : IVirtualNetworkRelay
         try
         {
             _udpClient = new UdpClient(_options.BindEndPoint);
+            _linuxUdpBatchSocket = LinuxUdpBatchSocket.TryCreate(
+                _udpClient.Client,
+                _options.MaxPacketSize,
+                _logger);
             _runtimeCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            _receiveLoop = Task.Run(() => ReceiveLoopAsync(_runtimeCancellation.Token));
+            _receiveLoop = Task.Run(() => _linuxUdpBatchSocket is null
+                ? ReceiveLoopAsync(_runtimeCancellation.Token)
+                : ReceiveLoopBatchAsync(_linuxUdpBatchSocket, _runtimeCancellation.Token));
             _cleanupLoop = Task.Run(() => CleanupLoopAsync(_runtimeCancellation.Token));
 
             Log(ProxyNetworkerLogLevel.Information, $"Virtual Network relay listening on UDP {_options.BindEndPoint} as gateway {_options.NodeAddress}/{_options.PrefixLength}.");
@@ -93,6 +209,8 @@ public sealed class VirtualNetworkRelay : IVirtualNetworkRelay
         {
             Interlocked.Exchange(ref _started, 0);
             _udpClient?.Dispose();
+            _linuxUdpBatchSocket?.Dispose();
+            _linuxUdpBatchSocket = null;
             _udpClient = null;
             _runtimeCancellation?.Dispose();
             _runtimeCancellation = null;
@@ -106,6 +224,8 @@ public sealed class VirtualNetworkRelay : IVirtualNetworkRelay
         {
             _runtimeCancellation?.Cancel();
             _udpClient?.Dispose();
+            _linuxUdpBatchSocket?.Dispose();
+            _linuxUdpBatchSocket = null;
 
             try
             {
@@ -139,7 +259,7 @@ public sealed class VirtualNetworkRelay : IVirtualNetworkRelay
                     continue;
                 }
 
-                if (!VirtualNetworkFrame.TryParse(received.Buffer, _options.AuthenticationKey, out var frame))
+                if (!VirtualNetworkFrame.TryParse(received.Buffer, _options.AuthenticationKey, _options.EncryptionEnabled, out var frame))
                 {
                     Log(ProxyNetworkerLogLevel.Warning, $"Ignored malformed Virtual Network datagram from {received.RemoteEndPoint}.");
                     continue;
@@ -158,6 +278,59 @@ public sealed class VirtualNetworkRelay : IVirtualNetworkRelay
             catch (Exception ex)
             {
                 Log(ProxyNetworkerLogLevel.Error, "Virtual Network relay receive loop failed.", ex);
+                return;
+            }
+        }
+    }
+
+    private async Task ReceiveLoopBatchAsync(LinuxUdpBatchSocket transport, CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                var count = transport.ReceiveBatch(cancellationToken);
+                for (var index = 0; index < count; index++)
+                {
+                    var received = transport.GetReceived(index);
+                    if (received.Length == 0 || received.Length > _options.MaxPacketSize)
+                    {
+                        continue;
+                    }
+
+                    if (!VirtualNetworkFrame.TryParse(
+                        received.Buffer,
+                        received.Length,
+                        _options.AuthenticationKey,
+                        _options.EncryptionEnabled,
+                        out var frame))
+                    {
+                        Log(ProxyNetworkerLogLevel.Warning, $"Ignored malformed Virtual Network datagram from {received.RemoteEndPoint}.");
+                        continue;
+                    }
+
+                    await HandleFrameAsync(frame, received.RemoteEndPoint, cancellationToken).ConfigureAwait(false);
+                }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (ObjectDisposedException) when (cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (SocketException) when (cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (IOException ex) when (cancellationToken.IsCancellationRequested && ex.Message.Contains("errno=9", StringComparison.Ordinal))
+            {
+                return;
+            }
+            catch (Exception ex)
+            {
+                Log(ProxyNetworkerLogLevel.Error, "Virtual Network batched relay receive loop failed.", ex);
                 return;
             }
         }
@@ -230,9 +403,58 @@ public sealed class VirtualNetworkRelay : IVirtualNetworkRelay
                 break;
 
             case VirtualNetworkFrameType.MeshLinkState:
-                if (RegisterPeer(frame.VirtualAddress, remoteEndPoint) is not null)
+                if (RegisterPeer(frame.VirtualAddress, remoteEndPoint) is not null &&
+                    VirtualNetworkMeshAdvertisement.TryDecode(frame.Payload.Span, out var advertisement))
                 {
+                    lock (_peersLock)
+                    {
+                        var key = AddressKey(frame.VirtualAddress);
+                        if (!_meshAdvertisements.TryGetValue(key, out var existing) ||
+                            existing.Advertisement.Sequence < advertisement.Sequence)
+                        {
+                            _meshAdvertisements[key] = new MeshAdvertisementObservation(
+                                frame.VirtualAddress,
+                                advertisement,
+                                DateTimeOffset.UtcNow);
+                        }
+                    }
                     await BroadcastMeshFrameAsync(frame, remoteEndPoint, cancellationToken).ConfigureAwait(false);
+                }
+                break;
+
+            case VirtualNetworkFrameType.MeshTrafficReport:
+                if (RegisterPeer(frame.VirtualAddress, remoteEndPoint) is not null &&
+                    VirtualNetworkMeshTrafficReport.TryDecode(frame.Payload.Span, out var trafficReport))
+                {
+                    lock (_peersLock)
+                    {
+                        var key = AddressKey(frame.VirtualAddress);
+                        if (!_meshTrafficReports.TryGetValue(key, out var existing) ||
+                            existing.Telemetry.Sequence < trafficReport.Sequence)
+                        {
+                            var observedAt = DateTimeOffset.UtcNow;
+                            var elapsedSeconds = existing is null
+                                ? 0
+                                : Math.Max(0, (observedAt - existing.ObservedAt).TotalSeconds);
+                            var rates = new Dictionary<string, MeshTrafficRate>(StringComparer.OrdinalIgnoreCase);
+                            foreach (var link in trafficReport.Links)
+                            {
+                                var previous = existing?.Telemetry.Links.FirstOrDefault(
+                                    item => item.VirtualAddress.Equals(link.VirtualAddress));
+                                var sentDelta = previous is null ? 0 : Math.Max(0, link.BytesSent - previous.BytesSent);
+                                var receivedDelta = previous is null ? 0 : Math.Max(0, link.BytesReceived - previous.BytesReceived);
+                                rates[AddressKey(link.VirtualAddress)] = elapsedSeconds > 0
+                                    ? new MeshTrafficRate(sentDelta / elapsedSeconds, receivedDelta / elapsedSeconds)
+                                    : new MeshTrafficRate(0, 0);
+                            }
+
+                            _meshTrafficReports[key] = new MeshTrafficObservation(
+                                frame.VirtualAddress,
+                                trafficReport,
+                                observedAt,
+                                rates);
+                        }
+                    }
                 }
                 break;
 
@@ -253,7 +475,7 @@ public sealed class VirtualNetworkRelay : IVirtualNetworkRelay
                     frame.Type,
                     frame.VirtualAddress,
                     frame.Payload.Span,
-                    _options.AuthenticationKey);
+                    _options.AuthenticationKey, _options.EncryptionEnabled);
                 await SendFrameAsync(routedProbe, probePeer.EndPoint, cancellationToken).ConfigureAwait(false);
                 break;
 
@@ -261,7 +483,7 @@ public sealed class VirtualNetworkRelay : IVirtualNetworkRelay
                 var sourceAddress = TryReadIPv4Source(frame.Payload.Span, out var parsedSource)
                     ? parsedSource
                     : frame.VirtualAddress;
-                RegisterPeer(sourceAddress, remoteEndPoint);
+                RegisterPeer(sourceAddress, remoteEndPoint)?.RecordReceived(frame.Payload.Length);
                 await RoutePacketAsync(frame.Payload, remoteEndPoint, cancellationToken).ConfigureAwait(false);
                 break;
 
@@ -270,6 +492,8 @@ public sealed class VirtualNetworkRelay : IVirtualNetworkRelay
                 {
                     return;
                 }
+
+                RegisterPeer(frame.VirtualAddress, remoteEndPoint)?.RecordReceived(frame.Payload.Length);
 
                 lock (_peersLock)
                 {
@@ -294,8 +518,9 @@ public sealed class VirtualNetworkRelay : IVirtualNetworkRelay
                     VirtualNetworkFrameType.MeshPacket,
                     frame.VirtualAddress,
                     frame.Payload.Span,
-                    _options.AuthenticationKey);
+                    _options.AuthenticationKey, _options.EncryptionEnabled);
                 await SendFrameAsync(forwardedMeshFrame, meshTarget.EndPoint, cancellationToken).ConfigureAwait(false);
+                meshTarget.RecordSent(frame.Payload.Length);
                 break;
         }
     }
@@ -322,6 +547,7 @@ public sealed class VirtualNetworkRelay : IVirtualNetworkRelay
         if (peer is not null && !IsSamePeer(peer.EndPoint, sourcePeer))
         {
             await SendPacketFrameAsync(packet, peer.EndPoint, cancellationToken).ConfigureAwait(false);
+            peer.RecordSent(packet.Length);
         }
     }
 
@@ -341,17 +567,25 @@ public sealed class VirtualNetworkRelay : IVirtualNetworkRelay
             }
 
             await SendPacketFrameAsync(packet, peer.EndPoint, cancellationToken).ConfigureAwait(false);
+            peer.RecordSent(packet.Length);
         }
     }
 
     private async Task SendPacketFrameAsync(ReadOnlyMemory<byte> packet, IPEndPoint remoteEndPoint, CancellationToken cancellationToken)
     {
-        var frame = VirtualNetworkFrame.Create(VirtualNetworkFrameType.Packet, _options.NodeAddress, packet.Span, _options.AuthenticationKey);
+        var frame = VirtualNetworkFrame.Create(VirtualNetworkFrameType.Packet, _options.NodeAddress, packet.Span, _options.AuthenticationKey, _options.EncryptionEnabled);
         await SendFrameAsync(frame, remoteEndPoint, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task SendFrameAsync(byte[] frame, IPEndPoint remoteEndPoint, CancellationToken cancellationToken)
     {
+        var batchSocket = _linuxUdpBatchSocket;
+        if (batchSocket is not null)
+        {
+            batchSocket.Enqueue(frame, remoteEndPoint);
+            return;
+        }
+
         var udpClient = _udpClient;
         if (udpClient is null)
         {
@@ -392,7 +626,7 @@ public sealed class VirtualNetworkRelay : IVirtualNetworkRelay
                 VirtualNetworkFrameType.PeerCandidates,
                 peer.VirtualAddress,
                 payload,
-                _options.AuthenticationKey);
+                _options.AuthenticationKey, _options.EncryptionEnabled);
             await SendFrameAsync(frame, target.EndPoint, cancellationToken).ConfigureAwait(false);
         }
     }
@@ -419,7 +653,7 @@ public sealed class VirtualNetworkRelay : IVirtualNetworkRelay
                 frame.Type,
                 frame.VirtualAddress,
                 frame.Payload.Span,
-                _options.AuthenticationKey);
+                _options.AuthenticationKey, _options.EncryptionEnabled);
             await SendFrameAsync(forwardedFrame, target.EndPoint, cancellationToken).ConfigureAwait(false);
         }
     }
@@ -447,6 +681,8 @@ public sealed class VirtualNetworkRelay : IVirtualNetworkRelay
             if (_addressByEndpoint.TryGetValue(endpointKey, out var oldAddressKey) && oldAddressKey != addressKey)
             {
                 _peersByAddress.Remove(oldAddressKey);
+                _meshAdvertisements.Remove(oldAddressKey);
+                _meshTrafficReports.Remove(oldAddressKey);
             }
 
             _addressByEndpoint[endpointKey] = addressKey;
@@ -495,6 +731,8 @@ public sealed class VirtualNetworkRelay : IVirtualNetworkRelay
                 var peer = _peersByAddress[key];
                 _addressByEndpoint.Remove(EndPointKey(peer.EndPoint));
                 _peersByAddress.Remove(key);
+                _meshAdvertisements.Remove(key);
+                _meshTrafficReports.Remove(key);
                 Log(ProxyNetworkerLogLevel.Information, $"Virtual Network peer {peer.VirtualAddress} expired.");
             }
         }
@@ -579,6 +817,15 @@ public sealed class VirtualNetworkRelay : IVirtualNetworkRelay
 
     private sealed class VirtualNetworkPeer
     {
+        private readonly object _rateLock = new();
+        private long _bytesSent;
+        private long _bytesReceived;
+        private long _rateSampleBytesSent;
+        private long _rateSampleBytesReceived;
+        private DateTimeOffset _rateSampleAt = DateTimeOffset.UtcNow;
+        private double _bytesPerSecondSent;
+        private double _bytesPerSecondReceived;
+
         public VirtualNetworkPeer(IPAddress virtualAddress, IPEndPoint endPoint)
         {
             VirtualAddress = virtualAddress;
@@ -610,6 +857,50 @@ public sealed class VirtualNetworkRelay : IVirtualNetworkRelay
 
         public string ClientVersion { get; set; } = string.Empty;
 
+        public long BytesSent => Interlocked.Read(ref _bytesSent);
+
+        public long BytesReceived => Interlocked.Read(ref _bytesReceived);
+
+        public double BytesPerSecondSent { get { lock (_rateLock) { return _bytesPerSecondSent; } } }
+
+        public double BytesPerSecondReceived { get { lock (_rateLock) { return _bytesPerSecondReceived; } } }
+
+        public void UpdateRates(DateTimeOffset now)
+        {
+            lock (_rateLock)
+            {
+                var elapsedSeconds = (now - _rateSampleAt).TotalSeconds;
+                if (elapsedSeconds < 0.25)
+                {
+                    return;
+                }
+
+                var bytesSent = Interlocked.Read(ref _bytesSent);
+                var bytesReceived = Interlocked.Read(ref _bytesReceived);
+                _bytesPerSecondSent = Math.Max(0, bytesSent - _rateSampleBytesSent) / elapsedSeconds;
+                _bytesPerSecondReceived = Math.Max(0, bytesReceived - _rateSampleBytesReceived) / elapsedSeconds;
+                _rateSampleBytesSent = bytesSent;
+                _rateSampleBytesReceived = bytesReceived;
+                _rateSampleAt = now;
+            }
+        }
+
+        public void RecordSent(int bytes)
+        {
+            if (bytes > 0)
+            {
+                Interlocked.Add(ref _bytesSent, bytes);
+            }
+        }
+
+        public void RecordReceived(int bytes)
+        {
+            if (bytes > 0)
+            {
+                Interlocked.Add(ref _bytesReceived, bytes);
+            }
+        }
+
         public void ApplyNodeInfo(ReadOnlySpan<byte> payload)
         {
             if (!VirtualNetworkNodeInfo.TryParse(payload, out var nodeInfo))
@@ -637,8 +928,41 @@ public sealed class VirtualNetworkRelay : IVirtualNetworkRelay
                 ClientVersion,
                 EndPoint,
                 LocalEndPoints.ToArray(),
+                BytesSent,
+                BytesReceived,
+                ConnectedAt,
+                LastSeen);
+        }
+
+        public VirtualNetworkTopologyNodeSnapshot ToTopologyNode()
+        {
+            return new VirtualNetworkTopologyNodeSnapshot(
+                VirtualAddress,
+                "client",
+                NodeName,
+                MachineName,
+                OsDescription,
+                OsArchitecture,
+                ProcessArchitecture,
+                ClientVersion,
+                true,
+                BytesSent,
+                BytesReceived,
                 ConnectedAt,
                 LastSeen);
         }
     }
+
+    private sealed record MeshAdvertisementObservation(
+        IPAddress Origin,
+        VirtualNetworkMeshAdvertisement Advertisement,
+        DateTimeOffset ObservedAt);
+
+    private sealed record MeshTrafficObservation(
+        IPAddress Origin,
+        VirtualNetworkMeshTrafficReport Telemetry,
+        DateTimeOffset ObservedAt,
+        IReadOnlyDictionary<string, MeshTrafficRate> Rates);
+
+    private sealed record MeshTrafficRate(double BytesSent, double BytesReceived);
 }

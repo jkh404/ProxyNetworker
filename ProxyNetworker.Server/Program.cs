@@ -102,7 +102,19 @@ try
 
     app.UseExceptionHandler();
     app.UseDefaultFiles();
-    app.UseStaticFiles();
+    app.UseStaticFiles(new StaticFileOptions
+    {
+        OnPrepareResponse = context =>
+        {
+            var extension = Path.GetExtension(context.File.Name);
+            if (extension is ".html" or ".css" or ".js" or ".json")
+            {
+                context.Context.Response.Headers.CacheControl = "no-store, no-cache, must-revalidate";
+                context.Context.Response.Headers.Pragma = "no-cache";
+                context.Context.Response.Headers.Expires = "0";
+            }
+        }
+    });
     app.UseSerilogRequestLogging();
     app.UseWebSockets();
     app.UseAuthentication();
@@ -113,7 +125,10 @@ try
         Role: "Management API",
         Capabilities: ["port-tunnel", "virtual-network"])));
 
-    app.MapGet("/health", () => TypedResults.Ok(new HealthResponse("healthy", DateTimeOffset.UtcNow)));
+    app.MapGet("/health", () => TypedResults.Ok(new HealthResponse(
+        "healthy",
+        DateTimeOffset.UtcNow,
+        System.Net.Quic.QuicConnection.IsSupported)));
 
     app.MapManagementApi();
     app.MapClientTunnelApi();

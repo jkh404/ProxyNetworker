@@ -2,7 +2,7 @@
 
 Virtual Network definitions support two transport protocols:
 
-- `udp`: encrypted datagrams with latency-aware mesh routing, multi-hop forwarding, and relay fallback. This is the default.
+- `udp`: authenticated datagrams with latency-aware mesh routing, multi-hop forwarding, and relay fallback. AES-GCM is the default; deployments can opt into HMAC-only confidentiality-off mode while retaining tamper detection.
 - `quic`: a reliable encrypted QUIC stream relay.
 
 The protocol is selected when the virtual network is created and is returned to clients by the token configuration endpoint. QUIC currently uses the server relay. Direct and multi-hop peer paths are available only to UDP.
@@ -30,4 +30,33 @@ KCP was evaluated with `NoDelay`, fast resend, a 1 ms update interval, and conge
 
 Keep `udp` as the default protocol. It has the lowest measured relay latency and additionally supports direct and multi-hop mesh paths. Offer `quic` as the reliable alternative when packet loss must be hidden.
 
-Linux x64 deployments need `libmsquic.so.2` and `libnuma.so.1` available through `LD_LIBRARY_PATH`. Linux arm64 installations can use the distribution `libmsquic` package.
+Linux x64 deployments need `libmsquic.so.2`, `libnuma.so.1`, and a compatible `libcrypto.so.1.1` available through `LD_LIBRARY_PATH`. Linux arm64 installations can use the distribution `libmsquic` package.
+
+## Optional Encryption
+
+Virtual Network definitions expose `EncryptionEnabled`, defaulting to `true`.
+
+- Enabled: version 2 frames use AES-256-GCM for confidentiality, authenticity, and replay-window validation.
+- Disabled: version 3 frames keep payloads in plaintext but append an HMAC-SHA256 tag (first 16 bytes) and perform constant-time verification. The token-derived session key is still required, so this is not an unauthenticated plaintext mode.
+
+Changing the mode restarts the network runtime. Clients detect the new value during configuration refresh, rebuild their TUN runtime automatically, and negotiate the matching frame version.
+
+## Linux Batched Data Path
+
+Linux UDP transports probe for `recvmmsg` and `sendmmsg` and use a batch size of 32 when available. The receive path reuses pinned packet buffers; the send path retries partial `sendmmsg` results under backpressure. Other platforms and unsupported libc implementations keep the existing single-datagram path.
+
+Linux TUN probes `IFF_VNET_HDR`, `TUNSETVNETHDRSZ`, `TUNSETOFFLOAD`, and TSO4 support. When available it:
+
+- completes ordinary packets that carry `VIRTIO_NET_HDR_F_NEEDS_CSUM`;
+- splits incoming TCPv4 GSO frames into MTU-sized packets;
+- preserves terminal `PSH/FIN` only on the last segmented packet;
+- coalesces contiguous TCP segments into GSO writes with per-segment checksum completion.
+
+If any capability is unavailable or metadata is malformed, the client logs the reason and falls back without changing the virtual IP or token. Linux hosts under sustained high throughput should allow larger UDP socket buffers:
+
+```conf
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+```
+
+The client requests 4 MiB socket buffers when the host policy permits it. See [the Linux performance report](../docs/2026-11-01-linux-batch-gso-report.md) for the measured results.

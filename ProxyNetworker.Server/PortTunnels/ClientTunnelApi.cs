@@ -105,6 +105,7 @@ public static class ClientTunnelApi
             grant.Definition.PrefixLength,
             grant.Definition.Mtu,
             ProxyNetworker.Core.VirtualNetworkTransportProtocols.Normalize(grant.Definition.TransportProtocol),
+            grant.Definition.EncryptionEnabled,
             Convert.ToBase64String(authenticationKey)));
     }
 

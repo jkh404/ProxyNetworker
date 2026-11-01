@@ -10,4 +10,5 @@ public sealed record VirtualNetworkClientConfigResponse(
     int PrefixLength,
     int Mtu,
     string TransportProtocol,
+    bool EncryptionEnabled,
     string AuthenticationKey);
