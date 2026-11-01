@@ -14,6 +14,10 @@ public class VirtualNetworkTunnelOptions
 
     public string NodeName { get; set; } = Environment.MachineName;
 
+    public byte[] AuthenticationKey { get; set; } = Array.Empty<byte>();
+
+    public bool EnableDirectPaths { get; set; } = true;
+
     public int MaxPacketSize { get; set; } = 65535;
 
     public TimeSpan HeartbeatInterval { get; set; } = TimeSpan.FromSeconds(5);
@@ -50,6 +54,11 @@ public class VirtualNetworkTunnelOptions
         if (PeerTimeout <= HeartbeatInterval)
         {
             throw new ArgumentOutOfRangeException(nameof(PeerTimeout), PeerTimeout, "Peer timeout must be greater than the heartbeat interval.");
+        }
+
+        if (AuthenticationKey is not { Length: 32 })
+        {
+            throw new ArgumentException("Virtual Network authentication key must be 32 bytes.", nameof(AuthenticationKey));
         }
     }
 }

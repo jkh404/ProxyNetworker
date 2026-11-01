@@ -16,5 +16,11 @@ public sealed class VirtualNetworkRecord
 
     public int Mtu { get; set; }
 
+    public string TransportProtocol { get; set; } = "udp";
+
+    public bool IsEnabled { get; set; } = true;
+
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+
+    public long CreatedAtUnixMs { get; set; } = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 }

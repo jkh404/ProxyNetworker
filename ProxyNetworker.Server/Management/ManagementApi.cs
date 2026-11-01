@@ -7,6 +7,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using ProxyNetworker.Server.Data;
 using ProxyNetworker.Server.Security;
+using ProxyNetworker.Server.VirtualNetworks;
 
 namespace ProxyNetworker.Server.Management;
 
@@ -41,6 +42,10 @@ public static class ManagementApi
         virtualNetworks.MapDelete("/{id}", DeleteVirtualNetwork);
         virtualNetworks.MapGet("/{id}/tokens", ListVirtualNetworkTokens);
         virtualNetworks.MapPost("/{id}/tokens", CreateVirtualNetworkToken);
+        virtualNetworks.MapGet("/{id}/status", GetVirtualNetworkStatus);
+        virtualNetworks.MapPut("/{id}/enabled", SetVirtualNetworkEnabled);
+        virtualNetworks.MapPost("/{id}/bans", BanVirtualNetworkNode);
+        virtualNetworks.MapDelete("/{id}/bans/{virtualAddress}", UnbanVirtualNetworkNode);
 
         var portTunnels = app.MapGroup("/api/port-tunnels").RequireAuthorization();
         portTunnels.MapGet("/", ListPortTunnels);
@@ -293,8 +298,13 @@ public static class ManagementApi
             .Where(item => item.OwnerUserId == id)
             .ToArrayAsync(cancellationToken)
             .ConfigureAwait(false);
+        var virtualNetworkSessions = await db.VirtualNetworkSessions
+            .Where(item => virtualNetworkIds.Contains(item.NetworkId))
+            .ToArrayAsync(cancellationToken)
+            .ConfigureAwait(false);
 
         db.AccessTokens.RemoveRange(accessTokens);
+        db.VirtualNetworkSessions.RemoveRange(virtualNetworkSessions);
         db.VirtualNetworks.RemoveRange(virtualNetworks);
         db.PortTunnelDefinitions.RemoveRange(portTunnels);
         db.Users.Remove(user);
@@ -362,8 +372,10 @@ public static class ManagementApi
             query = query.Where(item => item.OwnerUserId == userId);
         }
 
-        var items = await query.ToArrayAsync(cancellationToken).ConfigureAwait(false);
-        items = items.OrderBy(item => item.CreatedAt).ToArray();
+        var items = await query
+            .OrderBy(item => item.CreatedAtUnixMs)
+            .ToArrayAsync(cancellationToken)
+            .ConfigureAwait(false);
         return TypedResults.Ok(items.Select(ToVirtualNetworkResponse).ToArray());
     }
 
@@ -405,6 +417,11 @@ public static class ManagementApi
         var mtu = request.Mtu > 0
             ? request.Mtu
             : networkDefaults.VirtualNetworkMtu;
+        var transportProtocol = ProxyNetworker.Core.VirtualNetworkTransportProtocols.Normalize(request.TransportProtocol);
+        if (!ProxyNetworker.Core.VirtualNetworkTransportProtocols.IsSupported(request.TransportProtocol))
+        {
+            return TypedResults.BadRequest(new ErrorResponse("Transport protocol must be udp or quic."));
+        }
 
         if (!IPAddress.TryParse(gatewayAddressValue, out var gatewayAddress) ||
             gatewayAddress.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork)
@@ -436,6 +453,7 @@ public static class ManagementApi
             return TypedResults.BadRequest(new ErrorResponse("No listen port is available in the assigned range."));
         }
 
+        var createdAt = DateTimeOffset.UtcNow;
         var record = new VirtualNetworkRecord
         {
             Id = Guid.NewGuid().ToString("N"),
@@ -445,7 +463,9 @@ public static class ManagementApi
             PrefixLength = prefixLength,
             ListenPort = listenPort.Value,
             Mtu = mtu,
-            CreatedAt = DateTimeOffset.UtcNow
+            TransportProtocol = transportProtocol,
+            CreatedAt = createdAt,
+            CreatedAtUnixMs = createdAt.ToUnixTimeMilliseconds()
         };
 
         db.VirtualNetworks.Add(record);
@@ -469,8 +489,13 @@ public static class ManagementApi
             .Where(item => item.ScopeKind == AccessTokenScopes.VirtualNetwork && item.ResourceId == id)
             .ToArrayAsync(cancellationToken)
             .ConfigureAwait(false);
+        var sessions = await db.VirtualNetworkSessions
+            .Where(item => item.NetworkId == id)
+            .ToArrayAsync(cancellationToken)
+            .ConfigureAwait(false);
 
         db.AccessTokens.RemoveRange(tokens);
+        db.VirtualNetworkSessions.RemoveRange(sessions);
         db.VirtualNetworks.Remove(record);
         await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         return TypedResults.NoContent();
@@ -488,8 +513,10 @@ public static class ManagementApi
             query = query.Where(item => item.OwnerUserId == userId);
         }
 
-        var items = await query.ToArrayAsync(cancellationToken).ConfigureAwait(false);
-        items = items.OrderBy(item => item.CreatedAt).ToArray();
+        var items = await query
+            .OrderBy(item => item.CreatedAtUnixMs)
+            .ToArrayAsync(cancellationToken)
+            .ConfigureAwait(false);
         return TypedResults.Ok(items.Select(ToPortTunnelResponse).ToArray());
     }
 
@@ -535,6 +562,7 @@ public static class ManagementApi
 
         var bandwidthLimitBytes = ApplySystemLimit(user.BandwidthLimitBytes, settings.MaxBandwidthLimitBytes);
         var maxTrafficSpeedBytesPerSecond = ApplySystemLimit(user.MaxTrafficSpeedBytesPerSecond, settings.MaxTrafficSpeedBytesPerSecond);
+        var createdAt = DateTimeOffset.UtcNow;
         var record = new PortTunnelDefinitionRecord
         {
             Id = Guid.NewGuid().ToString("N"),
@@ -546,7 +574,8 @@ public static class ManagementApi
             PublicPort = publicPort.Value,
             BandwidthLimitBytes = bandwidthLimitBytes,
             MaxTrafficSpeedBytesPerSecond = maxTrafficSpeedBytesPerSecond,
-            CreatedAt = DateTimeOffset.UtcNow
+            CreatedAt = createdAt,
+            CreatedAtUnixMs = createdAt.ToUnixTimeMilliseconds()
         };
 
         db.PortTunnelDefinitions.Add(record);
@@ -584,6 +613,230 @@ public static class ManagementApi
         CancellationToken cancellationToken)
     {
         return ListTokens(id, AccessTokenScopes.VirtualNetwork, principal, db, cancellationToken);
+    }
+
+    private static async Task<IResult> GetVirtualNetworkStatus(
+        string id,
+        ClaimsPrincipal principal,
+        ProxyNetworkerDbContext db,
+        VirtualNetworkRuntimeRegistry runtimeRegistry,
+        CancellationToken cancellationToken)
+    {
+        var network = await FindVirtualNetworkAsync(id, principal, db, cancellationToken).ConfigureAwait(false);
+        if (network is null)
+        {
+            return TypedResults.NotFound(new ErrorResponse("Virtual Network was not found."));
+        }
+
+        var tokens = await db.AccessTokens
+            .AsNoTracking()
+            .Where(item => item.ScopeKind == AccessTokenScopes.VirtualNetwork && item.ResourceId == id)
+            .OrderBy(item => item.CreatedAtUnixMs)
+            .ThenBy(item => item.Id)
+            .ToArrayAsync(cancellationToken)
+            .ConfigureAwait(false);
+        var tokenByAddress = new Dictionary<string, AccessTokenRecord>(StringComparer.OrdinalIgnoreCase);
+        foreach (var token in tokens)
+        {
+            var address = VirtualNetworkAccessService.ResolveClientAddress(network, token.Id, tokens);
+            if (address is not null)
+            {
+                tokenByAddress[address.ToString()] = token;
+            }
+        }
+
+        var onlineNodes = runtimeRegistry.GetPeerSnapshots(id)
+            .Select(peer =>
+            {
+                tokenByAddress.TryGetValue(peer.VirtualAddress.ToString(), out var token);
+                return new VirtualNetworkOnlineNodeResponse(
+                    peer.VirtualAddress.ToString(),
+                    peer.NodeName,
+                    peer.MachineName,
+                    peer.OsDescription,
+                    peer.OsArchitecture,
+                    peer.ProcessArchitecture,
+                    peer.ClientVersion,
+                    peer.PublicEndPoint.ToString(),
+                    peer.LocalEndPoints.Select(static endpoint => endpoint.ToString()).ToArray(),
+                    token?.Id ?? string.Empty,
+                    token?.TokenPreview ?? string.Empty,
+                    peer.ConnectedAt,
+                    peer.LastSeenAt);
+            })
+            .OrderBy(static node => node.VirtualAddress, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        var sessionRecords = await db.VirtualNetworkSessions
+            .AsNoTracking()
+            .Where(item => item.NetworkId == id)
+            .OrderByDescending(item => item.LastSeenAtUnixMs)
+            .Take(100)
+            .ToArrayAsync(cancellationToken)
+            .ConfigureAwait(false);
+        var sessions = sessionRecords
+            .Select(item => new VirtualNetworkSessionResponse(
+                item.Id,
+                item.VirtualAddress,
+                item.NodeName,
+                item.MachineName,
+                item.OsDescription,
+                item.OsArchitecture,
+                item.ProcessArchitecture,
+                item.ClientVersion,
+                item.PublicEndpoint,
+                item.LocalEndpoints.Split(new[] { ", " }, StringSplitOptions.RemoveEmptyEntries),
+                item.TokenId,
+                item.TokenPreview,
+                DateTimeOffset.FromUnixTimeMilliseconds(item.ConnectedAtUnixMs),
+                DateTimeOffset.FromUnixTimeMilliseconds(item.LastSeenAtUnixMs),
+                item.DisconnectedAtUnixMs is null
+                    ? null
+                    : DateTimeOffset.FromUnixTimeMilliseconds(item.DisconnectedAtUnixMs.Value)))
+            .ToArray();
+
+        var banRecords = await db.VirtualNetworkNodeBans
+            .AsNoTracking()
+            .Where(item => item.NetworkId == id)
+            .OrderByDescending(item => item.CreatedAtUnixMs)
+            .Take(100)
+            .ToArrayAsync(cancellationToken)
+            .ConfigureAwait(false);
+        var bans = banRecords
+            .Select(item => new VirtualNetworkNodeBanResponse(
+                item.Id,
+                item.VirtualAddress,
+                item.TokenId,
+                item.NodeName,
+                item.Reason,
+                DateTimeOffset.FromUnixTimeMilliseconds(item.CreatedAtUnixMs)))
+            .ToArray();
+
+        return TypedResults.Ok(new VirtualNetworkStatusResponse(
+            network.IsEnabled,
+            onlineNodes.Length,
+            onlineNodes,
+            tokens.Select(ToAccessTokenResponse).ToArray(),
+            sessions,
+            bans));
+    }
+
+    private static async Task<IResult> SetVirtualNetworkEnabled(
+        string id,
+        SetVirtualNetworkEnabledRequest request,
+        ClaimsPrincipal principal,
+        ProxyNetworkerDbContext db,
+        VirtualNetworkRuntimeRegistry runtimeRegistry,
+        CancellationToken cancellationToken)
+    {
+        var network = await FindVirtualNetworkAsync(id, principal, db, cancellationToken).ConfigureAwait(false);
+        if (network is null)
+        {
+            return TypedResults.NotFound(new ErrorResponse("Virtual Network was not found."));
+        }
+
+        network.IsEnabled = request.Enabled;
+        await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        if (!request.Enabled)
+        {
+            runtimeRegistry.Stop(id);
+        }
+
+        return TypedResults.Ok(ToVirtualNetworkResponse(network));
+    }
+
+    private static async Task<IResult> BanVirtualNetworkNode(
+        string id,
+        BanVirtualNetworkNodeRequest request,
+        ClaimsPrincipal principal,
+        ProxyNetworkerDbContext db,
+        VirtualNetworkRuntimeRegistry runtimeRegistry,
+        CancellationToken cancellationToken)
+    {
+        var network = await FindVirtualNetworkAsync(id, principal, db, cancellationToken).ConfigureAwait(false);
+        if (network is null)
+        {
+            return TypedResults.NotFound(new ErrorResponse("Virtual Network was not found."));
+        }
+
+        if (!IPAddress.TryParse(request.VirtualAddress, out var virtualAddress))
+        {
+            return TypedResults.BadRequest(new ErrorResponse("Virtual address must be valid."));
+        }
+
+        var address = virtualAddress.ToString();
+        var peer = runtimeRegistry.GetPeerSnapshots(id).FirstOrDefault(item => item.VirtualAddress.Equals(virtualAddress));
+        var tokens = await db.AccessTokens
+            .AsNoTracking()
+            .Where(item => item.ScopeKind == AccessTokenScopes.VirtualNetwork && item.ResourceId == id)
+            .OrderBy(item => item.CreatedAtUnixMs)
+            .ToArrayAsync(cancellationToken)
+            .ConfigureAwait(false);
+        var tokenId = peer is null
+            ? string.Empty
+            : tokens.FirstOrDefault(item => VirtualNetworkAccessService.ResolveClientAddress(network, item.Id, tokens)?.Equals(virtualAddress) == true)?.Id ?? string.Empty;
+
+        var ban = await db.VirtualNetworkNodeBans
+            .FirstOrDefaultAsync(item => item.NetworkId == id && item.VirtualAddress == address, cancellationToken)
+            .ConfigureAwait(false);
+        if (ban is null)
+        {
+            ban = new VirtualNetworkNodeBanRecord { NetworkId = id, VirtualAddress = address };
+            db.VirtualNetworkNodeBans.Add(ban);
+        }
+
+        ban.TokenId = tokenId;
+        ban.NodeName = peer?.NodeName ?? peer?.MachineName ?? string.Empty;
+        ban.Reason = string.IsNullOrWhiteSpace(request.Reason) ? "Banned by administrator" : request.Reason.Trim()[..Math.Min(request.Reason.Trim().Length, 512)];
+        ban.CreatedAtUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var openSessions = await db.VirtualNetworkSessions
+            .Where(item => item.NetworkId == id && item.VirtualAddress == address && item.DisconnectedAtUnixMs == null)
+            .ToArrayAsync(cancellationToken)
+            .ConfigureAwait(false);
+        foreach (var session in openSessions)
+        {
+            session.DisconnectedAtUnixMs = ban.CreatedAtUnixMs;
+        }
+        await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        runtimeRegistry.SetPeerBanned(id, virtualAddress, true);
+        return TypedResults.Ok(new VirtualNetworkNodeBanResponse(
+            ban.Id,
+            ban.VirtualAddress,
+            ban.TokenId,
+            ban.NodeName,
+            ban.Reason,
+            DateTimeOffset.FromUnixTimeMilliseconds(ban.CreatedAtUnixMs)));
+    }
+
+    private static async Task<IResult> UnbanVirtualNetworkNode(
+        string id,
+        string virtualAddress,
+        ClaimsPrincipal principal,
+        ProxyNetworkerDbContext db,
+        VirtualNetworkRuntimeRegistry runtimeRegistry,
+        CancellationToken cancellationToken)
+    {
+        var network = await FindVirtualNetworkAsync(id, principal, db, cancellationToken).ConfigureAwait(false);
+        if (network is null)
+        {
+            return TypedResults.NotFound(new ErrorResponse("Virtual Network was not found."));
+        }
+
+        if (!IPAddress.TryParse(virtualAddress, out var address))
+        {
+            return TypedResults.BadRequest(new ErrorResponse("Virtual address must be valid."));
+        }
+
+        var ban = await db.VirtualNetworkNodeBans
+            .FirstOrDefaultAsync(item => item.NetworkId == id && item.VirtualAddress == address.ToString(), cancellationToken)
+            .ConfigureAwait(false);
+        if (ban is not null)
+        {
+            db.VirtualNetworkNodeBans.Remove(ban);
+            await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        }
+        runtimeRegistry.SetPeerBanned(id, address, false);
+        return TypedResults.NoContent();
     }
 
     private static Task<IResult> CreateVirtualNetworkToken(
@@ -688,9 +941,10 @@ public static class ManagementApi
         var tokens = await db.AccessTokens
             .AsNoTracking()
             .Where(item => item.ResourceId == resourceId && item.ScopeKind == scope)
+            .OrderBy(item => item.CreatedAtUnixMs)
+            .ThenBy(item => item.Id)
             .ToArrayAsync(cancellationToken)
             .ConfigureAwait(false);
-        tokens = tokens.OrderBy(item => item.CreatedAt).ToArray();
 
         return TypedResults.Ok(tokens.Select(ToAccessTokenResponse).ToArray());
     }
@@ -733,6 +987,7 @@ public static class ManagementApi
         }
 
         var plainText = tokenGenerator.CreateToken(tokenPrefix);
+        var createdAt = DateTimeOffset.UtcNow;
         var record = new AccessTokenRecord
         {
             Id = Guid.NewGuid().ToString("N"),
@@ -744,7 +999,8 @@ public static class ManagementApi
             TokenType = tokenType,
             ValidFrom = request.ValidFrom,
             ValidUntil = request.ValidUntil,
-            CreatedAt = DateTimeOffset.UtcNow,
+            CreatedAt = createdAt,
+            CreatedAtUnixMs = createdAt.ToUnixTimeMilliseconds(),
             CreatedByUserId = AccountContext.UserId(principal)
         };
 
@@ -1071,6 +1327,8 @@ public static class ManagementApi
             record.PrefixLength,
             record.ListenPort,
             record.Mtu,
+            record.TransportProtocol,
+            record.IsEnabled,
             record.CreatedAt);
     }
 

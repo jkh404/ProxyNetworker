@@ -3,9 +3,11 @@
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net10.0</TargetFramework>
+    <RuntimeIdentifiers>win-x64;linux-x64;linux-arm64</RuntimeIdentifiers>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <IsAotCompatible>true</IsAotCompatible>
+    <ApplicationManifest Condition="'$(RuntimeIdentifier)' == 'win-x64' Or '$(RuntimeIdentifier)' == 'win-x86' Or '$(RuntimeIdentifier)' == 'win-arm' Or '$(RuntimeIdentifier)' == 'win-arm64' Or ('$(RuntimeIdentifier)' == '' And '$(OS)' == 'Windows_NT')">app.manifest</ApplicationManifest>
   </PropertyGroup>
 
   <ItemGroup>
@@ -18,12 +20,59 @@
     </None>
   </ItemGroup>
 
+  <ItemGroup Condition="'$(RuntimeIdentifier)' == 'linux-x64' Or '$(RuntimeIdentifier)' == 'linux-arm64' Or '$(RuntimeIdentifier)' == 'linux-arm' Or '$(RuntimeIdentifier)' == 'linux-musl-x64' Or '$(RuntimeIdentifier)' == 'linux-musl-arm64' Or '$(RuntimeIdentifier)' == 'linux-musl-arm'">
+    <None Update="run.sh">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </None>
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(RuntimeIdentifier)'=='win-x86' Or ('$(RuntimeIdentifier)'=='' And '$(OS)'=='Windows_NT' And '$(Platform)'=='x86')">
+    <Content Include="..\ProxyNetworker.Core\Platforms\Windows\Wintun\DLL\win-x86\wintun.dll">
+      <Link>wintun.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(RuntimeIdentifier)'=='win-x64' Or ('$(RuntimeIdentifier)'=='' And '$(OS)'=='Windows_NT' And ('$(Platform)'=='x64' Or ('$(Platform)'!='x86' And '$(Platform)'!='arm' And '$(Platform)'!='arm64')))">
+    <Content Include="..\ProxyNetworker.Core\Platforms\Windows\Wintun\DLL\win-x64\wintun.dll">
+      <Link>wintun.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(RuntimeIdentifier)'=='win-arm' Or ('$(RuntimeIdentifier)'=='' And '$(OS)'=='Windows_NT' And '$(Platform)'=='arm')">
+    <Content Include="..\ProxyNetworker.Core\Platforms\Windows\Wintun\DLL\win-arm\wintun.dll">
+      <Link>wintun.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(RuntimeIdentifier)'=='win-arm64' Or ('$(RuntimeIdentifier)'=='' And '$(OS)'=='Windows_NT' And '$(Platform)'=='arm64')">
+    <Content Include="..\ProxyNetworker.Core\Platforms\Windows\Wintun\DLL\win-arm64\wintun.dll">
+      <Link>wintun.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+  </ItemGroup>
+
   <ItemGroup>
-    <PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="10.0.9" />
     <PackageReference Include="Serilog" Version="4.3.1" />
-    <PackageReference Include="Serilog.Settings.Configuration" Version="10.0.1" />
     <PackageReference Include="Serilog.Sinks.Console" Version="6.1.1" />
     <PackageReference Include="Serilog.Sinks.File" Version="7.0.0" />
   </ItemGroup>
+
+  <Target Name="CopyMsQuicLinux" AfterTargets="Publish" Condition="'$(RuntimeIdentifier)' == 'linux-x64'">
+    <Copy SourceFiles="$(NuGetPackageRoot)stirlinglabs.msquic.bindings.runtime.linux-x64.openssl/2.2.2/runtimes/linux-x64/native/libmsquic-openssl.so"
+          DestinationFiles="$(PublishDir)libmsquic.so.2" />
+  </Target>
+
+  <Target Name="CopyMsQuicWindows" AfterTargets="Publish" Condition="'$(RuntimeIdentifier)' == 'win-x64'">
+    <Copy SourceFiles="$(NuGetPackageRoot)microsoft.native.quic.msquic.schannel/2.6.3/build/native/bin/x64/msquic.dll"
+          DestinationFiles="$(PublishDir)msquic.dll" />
+  </Target>
 
 </Project>

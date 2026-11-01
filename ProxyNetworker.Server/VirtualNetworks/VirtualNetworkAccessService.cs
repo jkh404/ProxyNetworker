@@ -45,6 +45,11 @@ public sealed class VirtualNetworkAccessService
             return null;
         }
 
+        if (!virtualNetwork.IsEnabled)
+        {
+            return null;
+        }
+
         var owner = await db.Users
             .AsNoTracking()
             .FirstOrDefaultAsync(item => item.Id == virtualNetwork.OwnerUserId, cancellationToken)
@@ -57,10 +62,23 @@ public sealed class VirtualNetworkAccessService
         var peerTokens = await db.AccessTokens
             .AsNoTracking()
             .Where(item => item.ScopeKind == AccessTokenScopes.VirtualNetwork && item.ResourceId == virtualNetwork.Id)
+            .OrderBy(item => item.CreatedAtUnixMs)
+            .ThenBy(item => item.Id)
             .ToArrayAsync(cancellationToken)
             .ConfigureAwait(false);
-        var clientAddress = TryAssignClientAddress(virtualNetwork, accessToken.Id, peerTokens);
+        var clientAddress = ResolveClientAddress(virtualNetwork, accessToken.Id, peerTokens);
         if (clientAddress is null)
+        {
+            return null;
+        }
+
+        var clientAddressText = clientAddress.ToString();
+        var isBanned = await db.VirtualNetworkNodeBans
+            .AsNoTracking()
+            .AnyAsync(item => item.NetworkId == virtualNetwork.Id &&
+                (item.VirtualAddress == clientAddressText || item.TokenId == accessToken.Id), cancellationToken)
+            .ConfigureAwait(false);
+        if (isBanned)
         {
             return null;
         }
@@ -95,7 +113,7 @@ public sealed class VirtualNetworkAccessService
         return true;
     }
 
-    private static IPAddress? TryAssignClientAddress(
+    public static IPAddress? ResolveClientAddress(
         VirtualNetworkRecord virtualNetwork,
         string currentTokenId,
         IEnumerable<AccessTokenRecord> tokens)
@@ -124,11 +142,8 @@ public sealed class VirtualNetworkAccessService
 
         var usableCount = (ulong)usableEnd - usableStart + 1;
         var assigned = new HashSet<uint>();
-        var orderedTokens = tokens
-            .Where(IsTokenUsable)
-            .OrderBy(static item => item.CreatedAt)
-            .ThenBy(static item => item.Id, StringComparer.Ordinal)
-            .ToArray();
+        // Callers provide tokens in CreatedAtUnixMs/Id order so address assignment stays stable.
+        var orderedTokens = tokens.Where(IsTokenUsable).ToArray();
 
         foreach (var token in orderedTokens)
         {

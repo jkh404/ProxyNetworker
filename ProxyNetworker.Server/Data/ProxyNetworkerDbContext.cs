@@ -9,8 +9,6 @@ public sealed class ProxyNetworkerDbContext : DbContext
     {
     }
 
-    public DbSet<TunnelRecord> Tunnels => Set<TunnelRecord>();
-
     public DbSet<UserAccount> Users => Set<UserAccount>();
 
     public DbSet<VirtualNetworkRecord> VirtualNetworks => Set<VirtualNetworkRecord>();
@@ -21,20 +19,12 @@ public sealed class ProxyNetworkerDbContext : DbContext
 
     public DbSet<SystemSettingsRecord> SystemSettings => Set<SystemSettingsRecord>();
 
+    public DbSet<VirtualNetworkSessionRecord> VirtualNetworkSessions => Set<VirtualNetworkSessionRecord>();
+
+    public DbSet<VirtualNetworkNodeBanRecord> VirtualNetworkNodeBans => Set<VirtualNetworkNodeBanRecord>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
-        var tunnel = modelBuilder.Entity<TunnelRecord>();
-        tunnel.HasKey(item => item.Id);
-        tunnel.Property(item => item.Id).HasMaxLength(32);
-        tunnel.Property(item => item.Name).HasMaxLength(128).IsRequired();
-        tunnel.Property(item => item.Kind).HasMaxLength(32).IsRequired();
-        tunnel.Property(item => item.Protocol).HasMaxLength(16);
-        tunnel.Property(item => item.PublicEndpoint).HasMaxLength(256).IsRequired();
-        tunnel.Property(item => item.PrivateService).HasMaxLength(256);
-        tunnel.Property(item => item.Status).HasMaxLength(32).IsRequired();
-        tunnel.HasIndex(item => item.Name);
-        tunnel.HasIndex(item => item.StartedAt);
-
         var user = modelBuilder.Entity<UserAccount>();
         user.HasKey(item => item.Id);
         user.Property(item => item.Id).HasMaxLength(32);
@@ -49,8 +39,11 @@ public sealed class ProxyNetworkerDbContext : DbContext
         virtualNetwork.Property(item => item.OwnerUserId).HasMaxLength(32).IsRequired();
         virtualNetwork.Property(item => item.Name).HasMaxLength(128).IsRequired();
         virtualNetwork.Property(item => item.GatewayAddress).HasMaxLength(64).IsRequired();
+        virtualNetwork.Property(item => item.TransportProtocol).HasMaxLength(8).IsRequired();
         virtualNetwork.HasIndex(item => item.OwnerUserId);
         virtualNetwork.HasIndex(item => item.ListenPort);
+        virtualNetwork.HasIndex(item => item.CreatedAtUnixMs);
+        virtualNetwork.HasIndex(item => new { item.OwnerUserId, item.CreatedAtUnixMs });
 
         var portTunnel = modelBuilder.Entity<PortTunnelDefinitionRecord>();
         portTunnel.HasKey(item => item.Id);
@@ -61,6 +54,8 @@ public sealed class ProxyNetworkerDbContext : DbContext
         portTunnel.Property(item => item.PrivateHost).HasMaxLength(256).IsRequired();
         portTunnel.HasIndex(item => item.OwnerUserId);
         portTunnel.HasIndex(item => item.PublicPort).IsUnique();
+        portTunnel.HasIndex(item => item.CreatedAtUnixMs);
+        portTunnel.HasIndex(item => new { item.OwnerUserId, item.CreatedAtUnixMs });
 
         var accessToken = modelBuilder.Entity<AccessTokenRecord>();
         accessToken.HasKey(item => item.Id);
@@ -74,9 +69,40 @@ public sealed class ProxyNetworkerDbContext : DbContext
         accessToken.Property(item => item.CreatedByUserId).HasMaxLength(32).IsRequired();
         accessToken.HasIndex(item => item.TokenHash).IsUnique();
         accessToken.HasIndex(item => new { item.ScopeKind, item.ResourceId });
+        accessToken.HasIndex(item => new { item.ScopeKind, item.ResourceId, item.CreatedAtUnixMs, item.Id });
 
         var systemSettings = modelBuilder.Entity<SystemSettingsRecord>();
         systemSettings.HasKey(item => item.Id);
         systemSettings.Property(item => item.Id).HasMaxLength(32);
+
+        var virtualNetworkSession = modelBuilder.Entity<VirtualNetworkSessionRecord>();
+        virtualNetworkSession.HasKey(item => item.Id);
+        virtualNetworkSession.Property(item => item.Id).HasMaxLength(32);
+        virtualNetworkSession.Property(item => item.NetworkId).HasMaxLength(32).IsRequired();
+        virtualNetworkSession.Property(item => item.VirtualAddress).HasMaxLength(64).IsRequired();
+        virtualNetworkSession.Property(item => item.TokenId).HasMaxLength(32).IsRequired();
+        virtualNetworkSession.Property(item => item.TokenPreview).HasMaxLength(32).IsRequired();
+        virtualNetworkSession.Property(item => item.NodeName).HasMaxLength(256).IsRequired();
+        virtualNetworkSession.Property(item => item.MachineName).HasMaxLength(256).IsRequired();
+        virtualNetworkSession.Property(item => item.OsDescription).HasMaxLength(512).IsRequired();
+        virtualNetworkSession.Property(item => item.OsArchitecture).HasMaxLength(64).IsRequired();
+        virtualNetworkSession.Property(item => item.ProcessArchitecture).HasMaxLength(64).IsRequired();
+        virtualNetworkSession.Property(item => item.ClientVersion).HasMaxLength(64).IsRequired();
+        virtualNetworkSession.Property(item => item.PublicEndpoint).HasMaxLength(256).IsRequired();
+        virtualNetworkSession.Property(item => item.LocalEndpoints).HasMaxLength(2048).IsRequired();
+        virtualNetworkSession.HasIndex(item => new { item.NetworkId, item.DisconnectedAtUnixMs });
+        virtualNetworkSession.HasIndex(item => new { item.NetworkId, item.LastSeenAtUnixMs });
+        virtualNetworkSession.HasIndex(item => new { item.NetworkId, item.VirtualAddress });
+
+        var virtualNetworkBan = modelBuilder.Entity<VirtualNetworkNodeBanRecord>();
+        virtualNetworkBan.HasKey(item => item.Id);
+        virtualNetworkBan.Property(item => item.Id).HasMaxLength(32);
+        virtualNetworkBan.Property(item => item.NetworkId).HasMaxLength(32).IsRequired();
+        virtualNetworkBan.Property(item => item.VirtualAddress).HasMaxLength(64).IsRequired();
+        virtualNetworkBan.Property(item => item.TokenId).HasMaxLength(32).IsRequired();
+        virtualNetworkBan.Property(item => item.NodeName).HasMaxLength(256).IsRequired();
+        virtualNetworkBan.Property(item => item.Reason).HasMaxLength(512).IsRequired();
+        virtualNetworkBan.HasIndex(item => new { item.NetworkId, item.VirtualAddress }).IsUnique();
+        virtualNetworkBan.HasIndex(item => new { item.NetworkId, item.TokenId });
     }
 }

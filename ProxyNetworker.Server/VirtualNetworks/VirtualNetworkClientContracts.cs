@@ -8,4 +8,6 @@ public sealed record VirtualNetworkClientConfigResponse(
     string GatewayAddress,
     string ClientAddress,
     int PrefixLength,
-    int Mtu);
+    int Mtu,
+    string TransportProtocol,
+    string AuthenticationKey);

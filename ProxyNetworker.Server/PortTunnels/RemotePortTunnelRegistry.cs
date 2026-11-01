@@ -1,5 +1,7 @@
 using System.Collections.Concurrent;
+using System.Net;
 using System.Net.WebSockets;
+using Microsoft.Extensions.Options;
 using ProxyNetworker.Server.Data;
 using ProxyNetworker.Server.Management;
 
@@ -9,10 +11,12 @@ public sealed class RemotePortTunnelRegistry : IDisposable
 {
     private readonly ConcurrentDictionary<string, RemotePortTunnelRelay> _relays = new(StringComparer.OrdinalIgnoreCase);
     private readonly ILoggerFactory _loggerFactory;
+    private readonly IPAddress _publicListenAddress;
 
-    public RemotePortTunnelRegistry(ILoggerFactory loggerFactory)
+    public RemotePortTunnelRegistry(ILoggerFactory loggerFactory, IOptions<NetworkDefaultsOptions> networkDefaults)
     {
         _loggerFactory = loggerFactory;
+        _publicListenAddress = IPAddress.Parse(networkDefaults.Value.PublicListenAddress);
     }
 
     public IReadOnlyCollection<TunnelSummary> List()
@@ -25,7 +29,7 @@ public sealed class RemotePortTunnelRegistry : IDisposable
 
     public async Task RunClientAsync(PortTunnelDefinitionRecord definition, WebSocket webSocket, CancellationToken cancellationToken)
     {
-        var relay = new RemotePortTunnelRelay(definition, _loggerFactory.CreateLogger<RemotePortTunnelRelay>());
+        var relay = new RemotePortTunnelRelay(definition, _publicListenAddress, _loggerFactory.CreateLogger<RemotePortTunnelRelay>());
         if (!_relays.TryAdd(definition.Id, relay))
         {
             throw new InvalidOperationException($"Port tunnel '{definition.Name}' already has a connected client.");

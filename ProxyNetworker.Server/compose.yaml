@@ -1,0 +1,38 @@
+name: proxynetworker
+
+services:
+  server:
+    build:
+      context: ..
+      dockerfile: ProxyNetworker.Server/Dockerfile
+    image: proxynetworker-server:local
+    container_name: proxynetworker-server
+    network_mode: host
+    restart: unless-stopped
+    init: true
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      DOTNET_ENVIRONMENT: Production
+      # Keep the management API on loopback and publish it through a reverse proxy.
+      ASPNETCORE_URLS: http://127.0.0.1:13301
+      urls: http://127.0.0.1:13301
+      ConnectionStrings__ProxyNetworker: Data Source=/data/proxynetworker.db
+      NetworkDefaults__PublicListenAddress: 0.0.0.0
+      SystemSettings__PublicPortRangeStart: "40000"
+      SystemSettings__PublicPortRangeEnd: "42999"
+      DOTNET_EnableDiagnostics: "0"
+      TZ: Asia/Shanghai
+    volumes:
+      - ./data:/data
+      - ./logs:/app/logs
+      - ./data-protection-keys:/app/data-protection-keys
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    logging:
+      driver: json-file
+      options:
+        max-size: 50m
+        max-file: "3"

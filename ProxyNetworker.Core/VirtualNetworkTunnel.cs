@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.NetworkInformation;
 using System.Net.Sockets;
 
 namespace ProxyNetworker.Core;
@@ -12,6 +13,7 @@ public sealed class VirtualNetworkTunnel : IDisposable
     private readonly object _peersLock = new();
     private readonly Dictionary<string, VirtualNetworkPeer> _peersByAddress = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _addressByEndpoint = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, PeerPathState> _directPeersByAddress = new(StringComparer.OrdinalIgnoreCase);
     private UdpClient? _udpClient;
     private IPEndPoint? _remoteEndPoint;
     private CancellationTokenSource? _runtimeCancellation;
@@ -78,6 +80,14 @@ public sealed class VirtualNetworkTunnel : IDisposable
             if (!IsServer)
             {
                 await SendControlFrameAsync(VirtualNetworkFrameType.Hello, _options.RemoteEndPoint!, cancellationToken).ConfigureAwait(false);
+                if (_options.EnableDirectPaths)
+                {
+                    await SendLocalCandidatesAsync(cancellationToken).ConfigureAwait(false);
+                }
+                else
+                {
+                    Log(ProxyNetworkerLogLevel.Information, "Virtual Network direct paths are disabled; using relay only.");
+                }
             }
 
             var mode = IsServer ? "server" : "client";
@@ -136,7 +146,7 @@ public sealed class VirtualNetworkTunnel : IDisposable
                     continue;
                 }
 
-                if (!VirtualNetworkFrame.TryParse(received.Buffer, out var frame))
+                if (!VirtualNetworkFrame.TryParse(received.Buffer, _options.AuthenticationKey, out var frame))
                 {
                     Log(ProxyNetworkerLogLevel.Warning, $"Ignored malformed Virtual Network datagram from {received.RemoteEndPoint}.");
                     continue;
@@ -148,9 +158,17 @@ public sealed class VirtualNetworkTunnel : IDisposable
                 {
                     await HandleServerFrameAsync(frame, received.RemoteEndPoint, cancellationToken).ConfigureAwait(false);
                 }
-                else
+                else if (IsConfiguredServer(received.RemoteEndPoint))
                 {
                     await HandleClientFrameAsync(frame, received.RemoteEndPoint, cancellationToken).ConfigureAwait(false);
+                }
+                else if (!_options.EnableDirectPaths)
+                {
+                    Log(ProxyNetworkerLogLevel.Debug, "Ignored direct Virtual Network datagram because relay-only mode is enabled.");
+                }
+                else
+                {
+                    await HandleDirectFrameAsync(frame, received.RemoteEndPoint, cancellationToken).ConfigureAwait(false);
                 }
             }
             catch (ObjectDisposedException) when (cancellationToken.IsCancellationRequested)
@@ -187,6 +205,10 @@ public sealed class VirtualNetworkTunnel : IDisposable
                 if (remoteEndPoint is not null)
                 {
                     await SendControlFrameAsync(VirtualNetworkFrameType.Heartbeat, remoteEndPoint, cancellationToken).ConfigureAwait(false);
+                    if (_options.EnableDirectPaths)
+                    {
+                        await ProbeDirectPeersAsync(cancellationToken).ConfigureAwait(false);
+                    }
                 }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -232,10 +254,333 @@ public sealed class VirtualNetworkTunnel : IDisposable
             return;
         }
 
-        if (frame.Type == VirtualNetworkFrameType.Packet)
+        if (frame.Type == VirtualNetworkFrameType.PeerCandidates)
         {
+            if (!_options.EnableDirectPaths)
+            {
+                return;
+            }
+
+            if (VirtualNetworkCandidateCodec.TryDecode(frame.Payload.Span, out var candidates))
+            {
+                UpdateDirectCandidates(frame.VirtualAddress, candidates);
+            }
+            else
+            {
+                Log(ProxyNetworkerLogLevel.Warning, $"Ignored malformed direct-path candidates for {frame.VirtualAddress}.");
+            }
+        }
+        else if (frame.Type == VirtualNetworkFrameType.Packet)
+        {
+            NotePathActivity(frame.VirtualAddress, remoteEndPoint);
             await _tunDevice.SendAsync(frame.Payload, cancellationToken).ConfigureAwait(false);
         }
+        else if (frame.Type == VirtualNetworkFrameType.PathProbe)
+        {
+            if (VirtualNetworkPathProbe.TryParse(frame.Payload.Span, out var probe) && probe.DestinationAddress.Equals(_options.NodeAddress))
+            {
+                var response = VirtualNetworkFrame.Create(
+                    VirtualNetworkFrameType.PathProbeAck,
+                    _options.NodeAddress,
+                    frame.Payload.Span,
+                    _options.AuthenticationKey);
+                await SendFrameAsync(response, remoteEndPoint, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        else if (frame.Type == VirtualNetworkFrameType.PathProbeAck &&
+            VirtualNetworkPathProbe.TryParse(frame.Payload.Span, out var probeAck))
+        {
+            RecordPathMeasurement(frame.VirtualAddress, remoteEndPoint, probeAck);
+        }
+    }
+
+    private async Task HandleDirectFrameAsync(VirtualNetworkFrame frame, IPEndPoint remoteEndPoint, CancellationToken cancellationToken)
+    {
+        if (!IsKnownDirectEndpoint(frame.VirtualAddress, remoteEndPoint))
+        {
+            Log(ProxyNetworkerLogLevel.Debug, $"Ignored direct Virtual Network datagram from unexpected endpoint {remoteEndPoint}.");
+            return;
+        }
+
+        switch (frame.Type)
+        {
+            case VirtualNetworkFrameType.PathProbe:
+                if (VirtualNetworkPathProbe.TryParse(frame.Payload.Span, out var probe) && probe.DestinationAddress.Equals(_options.NodeAddress))
+                {
+                    var response = VirtualNetworkFrame.Create(
+                        VirtualNetworkFrameType.PathProbeAck,
+                        _options.NodeAddress,
+                        frame.Payload.Span,
+                        _options.AuthenticationKey);
+                    await SendFrameAsync(response, remoteEndPoint, cancellationToken).ConfigureAwait(false);
+                }
+                break;
+
+            case VirtualNetworkFrameType.PathProbeAck:
+                if (VirtualNetworkPathProbe.TryParse(frame.Payload.Span, out var probeAck))
+                {
+                    RecordPathMeasurement(frame.VirtualAddress, remoteEndPoint, probeAck);
+                }
+                break;
+
+            case VirtualNetworkFrameType.Packet:
+                NotePathActivity(frame.VirtualAddress, remoteEndPoint);
+                await _tunDevice.SendAsync(frame.Payload, cancellationToken).ConfigureAwait(false);
+                break;
+        }
+    }
+
+    private async Task SendLocalCandidatesAsync(CancellationToken cancellationToken)
+    {
+        var remoteEndPoint = _options.RemoteEndPoint;
+        var udpClient = _udpClient;
+        if (remoteEndPoint is null || udpClient?.Client.LocalEndPoint is not IPEndPoint localEndPoint)
+        {
+            return;
+        }
+
+        var candidates = GetLocalCandidateEndPoints(localEndPoint.Port);
+        var payload = VirtualNetworkCandidateCodec.Encode(candidates);
+        var frame = VirtualNetworkFrame.Create(
+            VirtualNetworkFrameType.PeerCandidates,
+            _options.NodeAddress,
+            payload,
+            _options.AuthenticationKey);
+        await SendFrameAsync(frame, remoteEndPoint, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task ProbeDirectPeersAsync(CancellationToken cancellationToken)
+    {
+        List<(IPAddress VirtualAddress, IPEndPoint EndPoint)> probes = new();
+        var now = DateTimeOffset.UtcNow;
+        lock (_peersLock)
+        {
+            foreach (var state in _directPeersByAddress.Values)
+            {
+                foreach (var path in state.Paths.Values)
+                {
+                    path.LastProbeSent = now;
+                    probes.Add((state.VirtualAddress, path.EndPoint));
+                }
+            }
+        }
+
+        foreach (var probe in probes)
+        {
+            if (probe.VirtualAddress.Equals(_options.NodeAddress))
+            {
+                continue;
+            }
+
+            var payload = VirtualNetworkPathProbe.Create(probe.VirtualAddress);
+            var frame = VirtualNetworkFrame.Create(
+                VirtualNetworkFrameType.PathProbe,
+                _options.NodeAddress,
+                payload,
+                _options.AuthenticationKey);
+            await SendFrameAsync(frame, probe.EndPoint, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private IPEndPoint[] GetLocalCandidateEndPoints(int port)
+    {
+        var endpoints = new List<IPEndPoint>();
+        foreach (var networkInterface in NetworkInterface.GetAllNetworkInterfaces())
+        {
+            if (networkInterface.OperationalStatus != OperationalStatus.Up ||
+                networkInterface.NetworkInterfaceType is NetworkInterfaceType.Loopback or NetworkInterfaceType.Tunnel)
+            {
+                continue;
+            }
+
+            foreach (var unicast in networkInterface.GetIPProperties().UnicastAddresses)
+            {
+                var address = unicast.Address;
+                if (address.AddressFamily != AddressFamily.InterNetwork ||
+                    IPAddress.IsLoopback(address) ||
+                    address.Equals(IPAddress.Any) ||
+                    IsInVirtualNetwork(address))
+                {
+                    continue;
+                }
+
+                var bytes = address.GetAddressBytes();
+                if (bytes[0] == 169 && bytes[1] == 254)
+                {
+                    continue;
+                }
+
+                endpoints.Add(new IPEndPoint(address, port));
+            }
+        }
+
+        return endpoints.ToArray();
+    }
+
+    private bool IsInVirtualNetwork(IPAddress address)
+    {
+        var mask = _options.PrefixLength == 0 ? 0u : uint.MaxValue << (32 - _options.PrefixLength);
+        return (IPv4ToUInt32(address) & mask) == (IPv4ToUInt32(_options.NodeAddress) & mask);
+    }
+
+    private void UpdateDirectCandidates(IPAddress virtualAddress, IReadOnlyCollection<IPEndPoint> candidates)
+    {
+        if (virtualAddress.Equals(_options.NodeAddress))
+        {
+            return;
+        }
+
+        lock (_peersLock)
+        {
+            if (!_directPeersByAddress.TryGetValue(AddressKey(virtualAddress), out var state))
+            {
+                state = new PeerPathState(virtualAddress);
+                _directPeersByAddress[AddressKey(virtualAddress)] = state;
+            }
+
+            var previous = state.Candidates.ToArray();
+            state.Candidates.Clear();
+            state.Candidates.AddRange(candidates.Where(static endpoint => endpoint.Port > 0).DistinctBy(static endpoint => endpoint.ToString()));
+            var relayEndPoint = _options.RemoteEndPoint;
+            if (relayEndPoint is not null)
+            {
+                GetOrCreatePathLocked(state, relayEndPoint, isRelay: true);
+            }
+
+            foreach (var candidate in state.Candidates)
+            {
+                GetOrCreatePathLocked(state, candidate, isRelay: false);
+            }
+
+            var validEndpoints = state.Candidates
+                .Append(relayEndPoint)
+                .Where(static endpoint => endpoint is not null)
+                .Select(static endpoint => EndPointKey(endpoint!))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            foreach (var stalePath in state.Paths.Keys.Where(key => !validEndpoints.Contains(key)).ToArray())
+            {
+                state.Paths.Remove(stalePath);
+            }
+
+            if (!previous.SequenceEqual(state.Candidates))
+            {
+                Log(ProxyNetworkerLogLevel.Information,
+                    $"Virtual Network direct candidates for {virtualAddress}: {string.Join(", ", state.Candidates)}.");
+            }
+
+            SelectBestPathLocked(state);
+        }
+    }
+
+    private bool IsKnownDirectEndpoint(IPAddress virtualAddress, IPEndPoint remoteEndPoint)
+    {
+        lock (_peersLock)
+        {
+            return _directPeersByAddress.TryGetValue(AddressKey(virtualAddress), out var state) &&
+                state.Candidates.Any(candidate => EndPointEquals(candidate, remoteEndPoint));
+        }
+    }
+
+    private void RecordPathMeasurement(IPAddress virtualAddress, IPEndPoint remoteEndPoint, VirtualNetworkPathProbe probe)
+    {
+        var measuredAt = DateTimeOffset.UtcNow;
+        var rttMilliseconds = measuredAt.ToUnixTimeMilliseconds() - probe.TimestampMilliseconds;
+        if (rttMilliseconds < 0 || rttMilliseconds > 60_000)
+        {
+            return;
+        }
+
+        lock (_peersLock)
+        {
+            if (!_directPeersByAddress.TryGetValue(AddressKey(virtualAddress), out var state))
+            {
+                return;
+            }
+
+            var isRelay = IsConfiguredServer(remoteEndPoint);
+            var path = GetOrCreatePathLocked(state, remoteEndPoint, isRelay);
+            path.EwmaRttMs = path.EwmaRttMs is null
+                ? rttMilliseconds
+                : (path.EwmaRttMs.Value * 0.8) + (rttMilliseconds * 0.2);
+            path.LastRttMs = rttMilliseconds;
+            path.LastSuccess = measuredAt;
+            path.Received++;
+            SelectBestPathLocked(state);
+        }
+    }
+
+    private void NotePathActivity(IPAddress virtualAddress, IPEndPoint remoteEndPoint)
+    {
+        lock (_peersLock)
+        {
+            if (!_directPeersByAddress.TryGetValue(AddressKey(virtualAddress), out var state))
+            {
+                return;
+            }
+
+            var path = GetOrCreatePathLocked(state, remoteEndPoint, IsConfiguredServer(remoteEndPoint));
+            path.LastSuccess = DateTimeOffset.UtcNow;
+        }
+    }
+
+    private static PathMeasurement GetOrCreatePathLocked(PeerPathState state, IPEndPoint endPoint, bool isRelay)
+    {
+        var key = EndPointKey(endPoint);
+        if (!state.Paths.TryGetValue(key, out var path))
+        {
+            path = new PathMeasurement(endPoint, isRelay);
+            state.Paths[key] = path;
+        }
+
+        return path;
+    }
+
+    private void SelectBestPathLocked(PeerPathState state)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var relay = _options.RemoteEndPoint is null
+            ? null
+            : state.Paths.GetValueOrDefault(EndPointKey(_options.RemoteEndPoint));
+        var best = state.Paths.Values
+            .Where(path => path.EwmaRttMs is not null && now - path.LastSuccess <= _options.PeerTimeout)
+            .OrderBy(path => path.EwmaRttMs)
+            .ThenBy(path => path.IsRelay)
+            .FirstOrDefault() ?? relay;
+        if (best is null)
+        {
+            return;
+        }
+
+        var changed = state.ActiveEndPoint is null || !EndPointEquals(state.ActiveEndPoint, best.EndPoint);
+        state.ActiveEndPoint = best.EndPoint;
+        state.LastDirectSeen = best.LastSuccess;
+        if (changed)
+        {
+            var pathType = best.IsRelay ? "relay" : "direct";
+            var rtt = best.EwmaRttMs is null ? "pending" : $"{best.EwmaRttMs.Value:0.0} ms";
+            Log(ProxyNetworkerLogLevel.Information,
+                $"Virtual Network {pathType} path selected for {state.VirtualAddress} via {best.EndPoint} ({rtt}).");
+        }
+    }
+
+    private IPEndPoint? TryGetDirectEndPoint(IPAddress virtualAddress)
+    {
+        lock (_peersLock)
+        {
+            if (_directPeersByAddress.TryGetValue(AddressKey(virtualAddress), out var state) &&
+                state.ActiveEndPoint is not null &&
+                DateTimeOffset.UtcNow - state.LastDirectSeen <= _options.PeerTimeout)
+            {
+                return state.ActiveEndPoint;
+            }
+        }
+
+        return null;
+    }
+
+    private bool IsConfiguredServer(IPEndPoint remoteEndPoint)
+    {
+        return _options.RemoteEndPoint is not null && EndPointEquals(_options.RemoteEndPoint, remoteEndPoint);
     }
 
     private void OnTunPacketReceived(object? sender, TunPacketReceivedEventArgs e)
@@ -256,7 +601,15 @@ public sealed class VirtualNetworkTunnel : IDisposable
             var remoteEndPoint = _options.RemoteEndPoint;
             if (remoteEndPoint is not null)
             {
-                await SendPacketFrameAsync(packet, remoteEndPoint, CancellationToken.None).ConfigureAwait(false);
+                var targetEndPoint = remoteEndPoint;
+                if (_options.EnableDirectPaths &&
+                    TryReadIPv4Destination(packet, out var destination) &&
+                    !IsBroadcastOrMulticast(destination))
+                {
+                    targetEndPoint = TryGetDirectEndPoint(destination) ?? remoteEndPoint;
+                }
+
+                await SendPacketFrameAsync(packet, targetEndPoint, CancellationToken.None).ConfigureAwait(false);
             }
         }
         catch (ObjectDisposedException)
@@ -325,14 +678,14 @@ public sealed class VirtualNetworkTunnel : IDisposable
     private async Task SendControlFrameAsync(VirtualNetworkFrameType type, IPEndPoint remoteEndPoint, CancellationToken cancellationToken)
     {
         var nodeName = string.IsNullOrWhiteSpace(_options.NodeName) ? _options.NodeAddress.ToString() : _options.NodeName;
-        var payload = System.Text.Encoding.UTF8.GetBytes(nodeName);
-        var frame = VirtualNetworkFrame.Create(type, _options.NodeAddress, payload);
+        var payload = VirtualNetworkNodeInfo.FromEnvironment(nodeName).Encode();
+        var frame = VirtualNetworkFrame.Create(type, _options.NodeAddress, payload, _options.AuthenticationKey);
         await SendFrameAsync(frame, remoteEndPoint, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task SendPacketFrameAsync(ReadOnlyMemory<byte> packet, IPEndPoint remoteEndPoint, CancellationToken cancellationToken)
     {
-        var frame = VirtualNetworkFrame.Create(VirtualNetworkFrameType.Packet, _options.NodeAddress, packet.Span);
+        var frame = VirtualNetworkFrame.Create(VirtualNetworkFrameType.Packet, _options.NodeAddress, packet.Span, _options.AuthenticationKey);
         await SendFrameAsync(frame, remoteEndPoint, cancellationToken).ConfigureAwait(false);
     }
 
@@ -510,5 +863,46 @@ public sealed class VirtualNetworkTunnel : IDisposable
         public IPEndPoint EndPoint { get; set; }
 
         public DateTimeOffset LastSeen { get; set; }
+    }
+
+    private sealed class PeerPathState
+    {
+        public PeerPathState(IPAddress virtualAddress)
+        {
+            VirtualAddress = virtualAddress;
+        }
+
+        public IPAddress VirtualAddress { get; }
+
+        public List<IPEndPoint> Candidates { get; } = new();
+
+        public Dictionary<string, PathMeasurement> Paths { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+        public IPEndPoint? ActiveEndPoint { get; set; }
+
+        public DateTimeOffset LastDirectSeen { get; set; }
+    }
+
+    private sealed class PathMeasurement
+    {
+        public PathMeasurement(IPEndPoint endPoint, bool isRelay)
+        {
+            EndPoint = endPoint;
+            IsRelay = isRelay;
+        }
+
+        public IPEndPoint EndPoint { get; }
+
+        public bool IsRelay { get; }
+
+        public double? EwmaRttMs { get; set; }
+
+        public long LastRttMs { get; set; }
+
+        public DateTimeOffset LastSuccess { get; set; }
+
+        public DateTimeOffset LastProbeSent { get; set; }
+
+        public int Received { get; set; }
     }
 }

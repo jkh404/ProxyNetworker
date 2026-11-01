@@ -1,11 +1,10 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using System.Text.Json.Serialization.Metadata;
 
 internal sealed class ManagementApiClient : IDisposable
 {
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
-
     private readonly HttpClientHandler _handler;
     private readonly HttpClient _httpClient;
 
@@ -26,10 +25,10 @@ internal sealed class ManagementApiClient : IDisposable
         var response = await _httpClient.PostAsJsonAsync(
             "api/auth/login",
             new LoginRequest(username, password),
-            JsonOptions,
+            ClientJsonContext.Default.LoginRequest,
             cancellationToken).ConfigureAwait(false);
 
-        return await ReadRequiredAsync<AccountResponse>(response, cancellationToken).ConfigureAwait(false);
+        return await ReadRequiredAsync(response, ClientJsonContext.Default.AccountResponse, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task ChangePasswordAsync(string currentPassword, string newPassword, CancellationToken cancellationToken)
@@ -37,7 +36,7 @@ internal sealed class ManagementApiClient : IDisposable
         var response = await _httpClient.PostAsJsonAsync(
             "api/auth/change-password",
             new ChangePasswordRequest(currentPassword, newPassword),
-            JsonOptions,
+            ClientJsonContext.Default.ChangePasswordRequest,
             cancellationToken).ConfigureAwait(false);
 
         await EnsureSuccessAsync(response, cancellationToken).ConfigureAwait(false);
@@ -53,10 +52,10 @@ internal sealed class ManagementApiClient : IDisposable
         var response = await _httpClient.PostAsJsonAsync(
             "api/port-tunnels",
             new CreatePortTunnelDefinitionRequest(name, protocol, privateHost, privatePort),
-            JsonOptions,
+            ClientJsonContext.Default.CreatePortTunnelDefinitionRequest,
             cancellationToken).ConfigureAwait(false);
 
-        return await ReadRequiredAsync<PortTunnelDefinitionResponse>(response, cancellationToken).ConfigureAwait(false);
+        return await ReadRequiredAsync(response, ClientJsonContext.Default.PortTunnelDefinitionResponse, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<VirtualNetworkDefinitionResponse> CreateVirtualNetworkAsync(
@@ -65,15 +64,16 @@ internal sealed class ManagementApiClient : IDisposable
         int prefixLength,
         int listenPort,
         int mtu,
+        string transportProtocol,
         CancellationToken cancellationToken)
     {
         var response = await _httpClient.PostAsJsonAsync(
             "api/virtual-networks",
-            new CreateVirtualNetworkDefinitionRequest(name, gatewayAddress, prefixLength, listenPort, mtu),
-            JsonOptions,
+            new CreateVirtualNetworkDefinitionRequest(name, gatewayAddress, prefixLength, listenPort, mtu, transportProtocol),
+            ClientJsonContext.Default.CreateVirtualNetworkDefinitionRequest,
             cancellationToken).ConfigureAwait(false);
 
-        return await ReadRequiredAsync<VirtualNetworkDefinitionResponse>(response, cancellationToken).ConfigureAwait(false);
+        return await ReadRequiredAsync(response, ClientJsonContext.Default.VirtualNetworkDefinitionResponse, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<CreatedAccessTokenResponse> CreatePortTunnelTokenAsync(
@@ -86,10 +86,10 @@ internal sealed class ManagementApiClient : IDisposable
         var response = await _httpClient.PostAsJsonAsync(
             $"api/port-tunnels/{Uri.EscapeDataString(tunnelId)}/tokens",
             new CreateAccessTokenRequest(tokenType, validFrom, validUntil),
-            JsonOptions,
+            ClientJsonContext.Default.CreateAccessTokenRequest,
             cancellationToken).ConfigureAwait(false);
 
-        return await ReadRequiredAsync<CreatedAccessTokenResponse>(response, cancellationToken).ConfigureAwait(false);
+        return await ReadRequiredAsync(response, ClientJsonContext.Default.CreatedAccessTokenResponse, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<CreatedAccessTokenResponse> CreateVirtualNetworkTokenAsync(
@@ -102,10 +102,10 @@ internal sealed class ManagementApiClient : IDisposable
         var response = await _httpClient.PostAsJsonAsync(
             $"api/virtual-networks/{Uri.EscapeDataString(networkId)}/tokens",
             new CreateAccessTokenRequest(tokenType, validFrom, validUntil),
-            JsonOptions,
+            ClientJsonContext.Default.CreateAccessTokenRequest,
             cancellationToken).ConfigureAwait(false);
 
-        return await ReadRequiredAsync<CreatedAccessTokenResponse>(response, cancellationToken).ConfigureAwait(false);
+        return await ReadRequiredAsync(response, ClientJsonContext.Default.CreatedAccessTokenResponse, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<VirtualNetworkClientConfigResponse> GetVirtualNetworkConfigAsync(
@@ -122,7 +122,7 @@ internal sealed class ManagementApiClient : IDisposable
                 "Check that the configured vnet_ token was created on this server and is not expired or already consumed.");
         }
 
-        return await ReadRequiredAsync<VirtualNetworkClientConfigResponse>(response, cancellationToken).ConfigureAwait(false);
+        return await ReadRequiredAsync(response, ClientJsonContext.Default.VirtualNetworkClientConfigResponse, cancellationToken).ConfigureAwait(false);
     }
 
     public void Dispose()
@@ -140,10 +140,10 @@ internal sealed class ManagementApiClient : IDisposable
         return new Uri(value.EndsWith("/", StringComparison.Ordinal) ? value : $"{value}/");
     }
 
-    private static async Task<T> ReadRequiredAsync<T>(HttpResponseMessage response, CancellationToken cancellationToken)
+    private static async Task<T> ReadRequiredAsync<T>(HttpResponseMessage response, JsonTypeInfo<T> typeInfo, CancellationToken cancellationToken)
     {
         await EnsureSuccessAsync(response, cancellationToken).ConfigureAwait(false);
-        var result = await response.Content.ReadFromJsonAsync<T>(JsonOptions, cancellationToken).ConfigureAwait(false);
+        var result = await response.Content.ReadFromJsonAsync(typeInfo, cancellationToken).ConfigureAwait(false);
         return result ?? throw new InvalidOperationException("Server returned an empty response.");
     }
 
@@ -168,7 +168,7 @@ internal sealed class ManagementApiClient : IDisposable
 
         try
         {
-            return JsonSerializer.Deserialize<ErrorResponse>(body, JsonOptions)?.Message;
+            return JsonSerializer.Deserialize(body, ClientJsonContext.Default.ErrorResponse)?.Message;
         }
         catch (JsonException)
         {
@@ -208,7 +208,8 @@ internal sealed record CreateVirtualNetworkDefinitionRequest(
     string GatewayAddress,
     int PrefixLength,
     int ListenPort,
-    int Mtu);
+    int Mtu,
+    string TransportProtocol);
 
 internal sealed record VirtualNetworkDefinitionResponse(
     string Id,
@@ -218,6 +219,8 @@ internal sealed record VirtualNetworkDefinitionResponse(
     int PrefixLength,
     int ListenPort,
     int Mtu,
+    string TransportProtocol,
+    bool IsEnabled,
     DateTimeOffset CreatedAt);
 
 internal sealed record PortTunnelDefinitionResponse(
@@ -260,4 +263,6 @@ internal sealed record VirtualNetworkClientConfigResponse(
     string GatewayAddress,
     string ClientAddress,
     int PrefixLength,
-    int Mtu);
+    int Mtu,
+    string TransportProtocol,
+    string AuthenticationKey);

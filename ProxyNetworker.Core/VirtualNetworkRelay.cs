@@ -3,7 +3,7 @@ using System.Net.Sockets;
 
 namespace ProxyNetworker.Core;
 
-public sealed class VirtualNetworkRelay : IDisposable
+public sealed class VirtualNetworkRelay : IVirtualNetworkRelay
 {
     private readonly VirtualNetworkTunnelOptions _options;
     private readonly Action<ProxyNetworkerLogEntry>? _logger;
@@ -11,6 +11,7 @@ public sealed class VirtualNetworkRelay : IDisposable
     private readonly object _peersLock = new();
     private readonly Dictionary<string, VirtualNetworkPeer> _peersByAddress = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _addressByEndpoint = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _bannedAddresses = new(StringComparer.OrdinalIgnoreCase);
     private UdpClient? _udpClient;
     private CancellationTokenSource? _runtimeCancellation;
     private Task? _receiveLoop;
@@ -35,6 +36,37 @@ public sealed class VirtualNetworkRelay : IDisposable
             {
                 return _peersByAddress.Count;
             }
+        }
+    }
+
+    public void SetPeerBanned(IPAddress virtualAddress, bool isBanned)
+    {
+        lock (_peersLock)
+        {
+            var key = AddressKey(virtualAddress);
+            if (isBanned)
+            {
+                _bannedAddresses.Add(key);
+                if (_peersByAddress.Remove(key, out var peer))
+                {
+                    _addressByEndpoint.Remove(EndPointKey(peer.EndPoint));
+                }
+            }
+            else
+            {
+                _bannedAddresses.Remove(key);
+            }
+        }
+    }
+
+    public IReadOnlyList<VirtualNetworkPeerSnapshot> GetPeerSnapshots()
+    {
+        lock (_peersLock)
+        {
+            return _peersByAddress.Values
+                .Select(static peer => peer.ToSnapshot())
+                .OrderBy(static peer => peer.VirtualAddress.ToString())
+                .ToArray();
         }
     }
 
@@ -107,7 +139,7 @@ public sealed class VirtualNetworkRelay : IDisposable
                     continue;
                 }
 
-                if (!VirtualNetworkFrame.TryParse(received.Buffer, out var frame))
+                if (!VirtualNetworkFrame.TryParse(received.Buffer, _options.AuthenticationKey, out var frame))
                 {
                     Log(ProxyNetworkerLogLevel.Warning, $"Ignored malformed Virtual Network datagram from {received.RemoteEndPoint}.");
                     continue;
@@ -161,7 +193,50 @@ public sealed class VirtualNetworkRelay : IDisposable
         {
             case VirtualNetworkFrameType.Hello:
             case VirtualNetworkFrameType.Heartbeat:
-                RegisterPeer(frame.VirtualAddress, remoteEndPoint);
+                var heartbeatPeer = RegisterPeer(frame.VirtualAddress, remoteEndPoint, frame.Payload.Span);
+                if (heartbeatPeer is not null)
+                {
+                    await BroadcastPeerCandidatesAsync(heartbeatPeer, cancellationToken).ConfigureAwait(false);
+                }
+                break;
+
+            case VirtualNetworkFrameType.PeerCandidates:
+                var candidatePeer = RegisterPeer(frame.VirtualAddress, remoteEndPoint);
+                if (candidatePeer is null)
+                {
+                    return;
+                }
+
+                if (!VirtualNetworkCandidateCodec.TryDecode(frame.Payload.Span, out var candidates))
+                {
+                    Log(ProxyNetworkerLogLevel.Warning, $"Ignored malformed direct-path candidates from {frame.VirtualAddress}.");
+                    return;
+                }
+
+                candidatePeer.LocalEndPoints.Clear();
+                candidatePeer.LocalEndPoints.AddRange(candidates);
+                await BroadcastPeerCandidatesAsync(candidatePeer, cancellationToken).ConfigureAwait(false);
+                break;
+
+            case VirtualNetworkFrameType.PathProbe:
+            case VirtualNetworkFrameType.PathProbeAck:
+                if (!VirtualNetworkPathProbe.TryParse(frame.Payload.Span, out var probe))
+                {
+                    return;
+                }
+
+                var probePeer = FindPeer(probe.DestinationAddress);
+                if (probePeer is null || IsSamePeer(probePeer.EndPoint, remoteEndPoint))
+                {
+                    return;
+                }
+
+                var routedProbe = VirtualNetworkFrame.Create(
+                    frame.Type,
+                    frame.VirtualAddress,
+                    frame.Payload.Span,
+                    _options.AuthenticationKey);
+                await SendFrameAsync(routedProbe, probePeer.EndPoint, cancellationToken).ConfigureAwait(false);
                 break;
 
             case VirtualNetworkFrameType.Packet:
@@ -220,7 +295,7 @@ public sealed class VirtualNetworkRelay : IDisposable
 
     private async Task SendPacketFrameAsync(ReadOnlyMemory<byte> packet, IPEndPoint remoteEndPoint, CancellationToken cancellationToken)
     {
-        var frame = VirtualNetworkFrame.Create(VirtualNetworkFrameType.Packet, _options.NodeAddress, packet.Span);
+        var frame = VirtualNetworkFrame.Create(VirtualNetworkFrameType.Packet, _options.NodeAddress, packet.Span, _options.AuthenticationKey);
         await SendFrameAsync(frame, remoteEndPoint, cancellationToken).ConfigureAwait(false);
     }
 
@@ -243,11 +318,40 @@ public sealed class VirtualNetworkRelay : IDisposable
         }
     }
 
-    private void RegisterPeer(IPAddress virtualAddress, IPEndPoint remoteEndPoint)
+    private async Task BroadcastPeerCandidatesAsync(VirtualNetworkPeer peer, CancellationToken cancellationToken)
+    {
+        VirtualNetworkPeer[] peers;
+        lock (_peersLock)
+        {
+            peers = _peersByAddress.Values.ToArray();
+        }
+
+        var endpoints = new[] { peer.EndPoint }.Concat(peer.LocalEndPoints);
+        var payload = VirtualNetworkCandidateCodec.Encode(endpoints);
+        foreach (var target in peers)
+        {
+            if (IsSamePeer(target.EndPoint, peer.EndPoint))
+            {
+                continue;
+            }
+
+            var frame = VirtualNetworkFrame.Create(
+                VirtualNetworkFrameType.PeerCandidates,
+                peer.VirtualAddress,
+                payload,
+                _options.AuthenticationKey);
+            await SendFrameAsync(frame, target.EndPoint, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private VirtualNetworkPeer? RegisterPeer(
+        IPAddress virtualAddress,
+        IPEndPoint remoteEndPoint,
+        ReadOnlySpan<byte> nodeInfoPayload = default)
     {
         if (virtualAddress.Equals(_options.NodeAddress))
         {
-            return;
+            return null;
         }
 
         var addressKey = AddressKey(virtualAddress);
@@ -255,6 +359,11 @@ public sealed class VirtualNetworkRelay : IDisposable
 
         lock (_peersLock)
         {
+            if (_bannedAddresses.Contains(addressKey))
+            {
+                return null;
+            }
+
             if (_addressByEndpoint.TryGetValue(endpointKey, out var oldAddressKey) && oldAddressKey != addressKey)
             {
                 _peersByAddress.Remove(oldAddressKey);
@@ -266,11 +375,15 @@ public sealed class VirtualNetworkRelay : IDisposable
             {
                 peer.EndPoint = remoteEndPoint;
                 peer.LastSeen = DateTimeOffset.UtcNow;
-                return;
+                peer.ApplyNodeInfo(nodeInfoPayload);
+                return peer;
             }
 
-            _peersByAddress[addressKey] = new VirtualNetworkPeer(virtualAddress, remoteEndPoint);
+            peer = new VirtualNetworkPeer(virtualAddress, remoteEndPoint);
+            peer.ApplyNodeInfo(nodeInfoPayload);
+            _peersByAddress[addressKey] = peer;
             Log(ProxyNetworkerLogLevel.Information, $"Virtual Network peer {virtualAddress} registered from {remoteEndPoint}.");
+            return peer;
         }
     }
 
@@ -397,6 +510,53 @@ public sealed class VirtualNetworkRelay : IDisposable
 
         public IPEndPoint EndPoint { get; set; }
 
+        public List<IPEndPoint> LocalEndPoints { get; } = new();
+
         public DateTimeOffset LastSeen { get; set; }
+
+        public DateTimeOffset ConnectedAt { get; } = DateTimeOffset.UtcNow;
+
+        public string NodeName { get; set; } = string.Empty;
+
+        public string MachineName { get; set; } = string.Empty;
+
+        public string OsDescription { get; set; } = string.Empty;
+
+        public string OsArchitecture { get; set; } = string.Empty;
+
+        public string ProcessArchitecture { get; set; } = string.Empty;
+
+        public string ClientVersion { get; set; } = string.Empty;
+
+        public void ApplyNodeInfo(ReadOnlySpan<byte> payload)
+        {
+            if (!VirtualNetworkNodeInfo.TryParse(payload, out var nodeInfo))
+            {
+                return;
+            }
+
+            NodeName = nodeInfo.NodeName;
+            MachineName = nodeInfo.MachineName;
+            OsDescription = nodeInfo.OsDescription;
+            OsArchitecture = nodeInfo.OsArchitecture;
+            ProcessArchitecture = nodeInfo.ProcessArchitecture;
+            ClientVersion = nodeInfo.ClientVersion;
+        }
+
+        public VirtualNetworkPeerSnapshot ToSnapshot()
+        {
+            return new VirtualNetworkPeerSnapshot(
+                VirtualAddress,
+                NodeName,
+                MachineName,
+                OsDescription,
+                OsArchitecture,
+                ProcessArchitecture,
+                ClientVersion,
+                EndPoint,
+                LocalEndPoints.ToArray(),
+                ConnectedAt,
+                LastSeen);
+        }
     }
 }

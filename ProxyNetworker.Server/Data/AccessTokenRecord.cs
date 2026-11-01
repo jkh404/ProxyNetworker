@@ -24,6 +24,8 @@ public sealed class AccessTokenRecord
 
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
 
+    public long CreatedAtUnixMs { get; set; } = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
     public string CreatedByUserId { get; set; } = string.Empty;
 }
 

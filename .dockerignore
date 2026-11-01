@@ -1,0 +1,15 @@
+.git
+.vs
+.temp
+.gitignore
+artifacts
+publish
+**/bin
+**/obj
+**/*.db
+**/*.db-shm
+**/*.db-wal
+**/*.db-journal
+ProxyNetworker.Client
+TestConsole
+wintun.h

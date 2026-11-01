@@ -33,24 +33,25 @@ internal sealed class ProxyNetworkerClientConfig
 
     public static async Task WriteSampleAsync(string path, CancellationToken cancellationToken)
     {
-        var sample = CreateSampleJson();
-        object output;
+        await using var stream = File.Create(path);
+        await using var writer = new Utf8JsonWriter(stream, new JsonWriterOptions { Indented = true });
+        writer.WriteStartObject();
         if (IsAppSettingsPath(path))
         {
-            output = new Dictionary<string, object>(StringComparer.Ordinal)
-            {
-                [AppSettingsSectionName] = sample,
-                ["Serilog"] = CreateSerilogSampleJson()
-            };
+            writer.WritePropertyName(AppSettingsSectionName);
+            WriteClientConfigSection(writer);
+            writer.WritePropertyName("Serilog");
+            WriteSerilogSection(writer);
         }
         else
         {
-            sample["Serilog"] = CreateSerilogSampleJson();
-            output = sample;
+            WriteClientConfigProperties(writer);
+            writer.WritePropertyName("Serilog");
+            WriteSerilogSection(writer);
         }
 
-        await using var stream = File.Create(path);
-        await JsonSerializer.SerializeAsync(stream, output, JsonOptions, cancellationToken).ConfigureAwait(false);
+        writer.WriteEndObject();
+        await writer.FlushAsync(cancellationToken).ConfigureAwait(false);
         await stream.WriteAsync("\n"u8.ToArray(), cancellationToken).ConfigureAwait(false);
     }
 
@@ -61,46 +62,48 @@ internal sealed class ProxyNetworkerClientConfig
 
     private static ProxyNetworkerClientConfig DeserializeConfig(JsonElement element)
     {
-        return element.Deserialize<ProxyNetworkerClientConfig>(JsonOptions) ?? new ProxyNetworkerClientConfig();
+        return element.Deserialize(ClientJsonContext.Default.ProxyNetworkerClientConfig) ?? new ProxyNetworkerClientConfig();
     }
 
-    private static Dictionary<string, object> CreateSampleJson()
+    private static void WriteClientConfigSection(Utf8JsonWriter writer)
     {
-        return new Dictionary<string, object>(StringComparer.Ordinal)
-        {
-            ["apiServer"] = "http://127.0.0.1:13301",
-            ["portTunnels"] = new[]
-            {
-                new
-                {
-                    enabled = false,
-                    name = "web",
-                    token = "ptun_replace_this_token"
-                }
-            },
-            ["virtualNetwork"] = new
-            {
-                enabled = false,
-                name = "pn-client",
-                token = "vnet_replace_this_token"
-            }
-        };
+        writer.WriteStartObject();
+        WriteClientConfigProperties(writer);
+        writer.WriteEndObject();
     }
 
-    private static object CreateSerilogSampleJson()
+    private static void WriteClientConfigProperties(Utf8JsonWriter writer)
     {
-        return new Dictionary<string, object>(StringComparer.Ordinal)
-        {
-            ["MinimumLevel"] = new Dictionary<string, object>(StringComparer.Ordinal)
-            {
-                ["Default"] = "Information",
-                ["Override"] = new Dictionary<string, string>(StringComparer.Ordinal)
-                {
-                    ["Microsoft"] = "Warning",
-                    ["System"] = "Warning"
-                }
-            }
-        };
+        writer.WriteString("apiServer", "http://127.0.0.1:13301");
+        writer.WritePropertyName("portTunnels");
+        writer.WriteStartArray();
+        writer.WriteStartObject();
+        writer.WriteBoolean("enabled", false);
+        writer.WriteString("name", "web");
+        writer.WriteString("token", "ptun_replace_this_token");
+        writer.WriteEndObject();
+        writer.WriteEndArray();
+        writer.WritePropertyName("virtualNetwork");
+        writer.WriteStartObject();
+        writer.WriteBoolean("enabled", false);
+        writer.WriteString("name", "pn-client");
+        writer.WriteString("token", "vnet_replace_this_token");
+        writer.WriteEndObject();
+    }
+
+    private static void WriteSerilogSection(Utf8JsonWriter writer)
+    {
+        writer.WriteStartObject();
+        writer.WritePropertyName("MinimumLevel");
+        writer.WriteStartObject();
+        writer.WriteString("Default", "Information");
+        writer.WritePropertyName("Override");
+        writer.WriteStartObject();
+        writer.WriteString("Microsoft", "Warning");
+        writer.WriteString("System", "Warning");
+        writer.WriteEndObject();
+        writer.WriteEndObject();
+        writer.WriteEndObject();
     }
 
     private static bool IsAppSettingsPath(string path)
@@ -125,11 +128,6 @@ internal sealed class ProxyNetworkerClientConfig
         value = default;
         return false;
     }
-
-    private static JsonSerializerOptions JsonOptions => new(JsonSerializerDefaults.Web)
-    {
-        WriteIndented = true
-    };
 }
 
 internal sealed class RemotePortTunnelClientConfig
@@ -153,6 +151,8 @@ internal sealed class DirectVirtualNetworkClientConfig
 
     public string Name { get; set; } = "pn-client";
 
+    public string? NodeDisplayName { get; set; }
+
     public string ServerHost { get; set; } = "127.0.0.1";
 
     public int ServerPort { get; set; } = 51820;
@@ -164,4 +164,10 @@ internal sealed class DirectVirtualNetworkClientConfig
     public int PrefixLength { get; set; } = 24;
 
     public int Mtu { get; set; } = 1400;
+
+    public string TransportProtocol { get; set; } = "udp";
+
+    public byte[] AuthenticationKey { get; set; } = Array.Empty<byte>();
+
+    public bool RelayOnly { get; set; }
 }

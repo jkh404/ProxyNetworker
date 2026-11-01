@@ -3,283 +3,498 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ProxyNetworker 管理后台</title>
+  <meta name="color-scheme" content="light">
+  <link rel="icon" href="data:,">
+  <title>ProxyNetworker · 控制台</title>
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
+  <svg class="svg-sprite" aria-hidden="true">
+    <symbol id="icon-dashboard" viewBox="0 0 24 24"><rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/></symbol>
+    <symbol id="icon-users" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></symbol>
+    <symbol id="icon-network" viewBox="0 0 24 24"><rect x="16" y="16" width="6" height="6" rx="1"/><rect x="2" y="16" width="6" height="6" rx="1"/><rect x="9" y="2" width="6" height="6" rx="1"/><path d="M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3"/><path d="M12 12V8"/></symbol>
+    <symbol id="icon-route" viewBox="0 0 24 24"><circle cx="6" cy="19" r="3"/><path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15"/><circle cx="18" cy="5" r="3"/></symbol>
+    <symbol id="icon-key" viewBox="0 0 24 24"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6"/><path d="m15.5 7.5 3 3"/><path d="m18.5 4.5 3 3"/></symbol>
+    <symbol id="icon-settings" viewBox="0 0 24 24"><path d="M20 7h-9"/><path d="M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/></symbol>
+    <symbol id="icon-plus" viewBox="0 0 24 24"><path d="M5 12h14"/><path d="M12 5v14"/></symbol>
+    <symbol id="icon-refresh" viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></symbol>
+    <symbol id="icon-pause" viewBox="0 0 24 24"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></symbol>
+    <symbol id="icon-play" viewBox="0 0 24 24"><path d="m7 4 13 8-13 8Z"/></symbol>
+    <symbol id="icon-copy" viewBox="0 0 24 24"><rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></symbol>
+    <symbol id="icon-trash" viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></symbol>
+    <symbol id="icon-edit" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></symbol>
+    <symbol id="icon-logout" viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/></symbol>
+    <symbol id="icon-close" viewBox="0 0 24 24"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></symbol>
+    <symbol id="icon-menu" viewBox="0 0 24 24"><path d="M4 6h16"/><path d="M4 12h16"/><path d="M4 18h16"/></symbol>
+    <symbol id="icon-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
+    <symbol id="icon-arrow-right" viewBox="0 0 24 24"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></symbol>
+    <symbol id="icon-arrow-up-right" viewBox="0 0 24 24"><path d="M7 17 17 7"/><path d="M7 7h10v10"/></symbol>
+    <symbol id="icon-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+    <symbol id="icon-alert" viewBox="0 0 24 24"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></symbol>
+    <symbol id="icon-activity" viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></symbol>
+    <symbol id="icon-server" viewBox="0 0 24 24"><rect width="20" height="8" x="2" y="2" rx="2"/><rect width="20" height="8" x="2" y="14" rx="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/></symbol>
+    <symbol id="icon-shield" viewBox="0 0 24 24"><path d="M20 13c0 5-3.5 7.5-8 9-4.5-1.5-8-4-8-9V5l8-3 8 3v8Z"/><path d="m9 12 2 2 4-4"/></symbol>
+    <symbol id="icon-eye" viewBox="0 0 24 24"><path d="M2.06 12.35a1 1 0 0 1 0-.7 10.75 10.75 0 0 1 19.88 0 1 1 0 0 1 0 .7 10.75 10.75 0 0 1-19.88 0"/><circle cx="12" cy="12" r="3"/></symbol>
+    <symbol id="icon-eye-off" viewBox="0 0 24 24"><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68"/><path d="M6.61 6.61A13.53 13.53 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"/><line x1="2" x2="22" y1="2" y2="22"/><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/></symbol>
+    <symbol id="icon-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></symbol>
+    <symbol id="icon-lock" viewBox="0 0 24 24"><rect width="18" height="11" x="3" y="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></symbol>
+  </svg>
+
   <div id="app" v-cloak>
-    <main v-if="sessionChecked && !me" class="login-shell">
-      <section class="login-panel">
-        <div>
-          <p class="eyebrow">ProxyNetworker</p>
-          <h1>管理后台</h1>
-          <p class="muted">登录后管理账号、配额、虚拟局域网和内网穿透访问令牌。</p>
+    <main v-if="sessionChecked && !me" class="login-screen">
+      <section class="login-brand-panel">
+        <div class="brand-lockup brand-lockup-light"><span class="brand-mark" aria-hidden="true"><i></i><i></i></span><span><strong>ProxyNetworker</strong><small>CONTROL PLANE</small></span></div>
+        <div class="login-statement"><p class="overline">PRIVATE NETWORK OPERATIONS</p><h1>网络边界，<br>清晰可见。</h1><p>统一管理用户、虚拟局域网、端口穿透和访问凭据。</p></div>
+        <div class="login-signals" aria-label="服务状态"><div><span class="signal-dot"></span><strong>CONTROL</strong><small>READY</small></div><div><svg class="icon"><use href="#icon-network"></use></svg><strong>MESH</strong><small>RELAY</small></div><div><svg class="icon"><use href="#icon-shield"></use></svg><strong>ACCESS</strong><small>MANAGED</small></div></div>
+      </section>
+      <section class="login-form-panel">
+        <div class="login-form-wrap">
+          <div class="login-form-heading"><span class="step-index">01 / AUTH</span><h2>进入控制台</h2><p>使用管理员或普通用户账号登录。</p></div>
+          <form class="login-form" @submit.prevent="login">
+            <label class="field"><span>账号</span><span class="input-shell"><svg class="icon"><use href="#icon-users"></use></svg><input id="login-username" name="username" aria-label="账号" v-model.trim="loginForm.username" autocomplete="username" placeholder="Username" required autofocus></span></label>
+            <label class="field"><span>密码</span><span class="input-shell"><svg class="icon"><use href="#icon-lock"></use></svg><input id="login-password" name="password" aria-label="密码" v-model="loginForm.password" :type="loginShowPassword ? 'text' : 'password'" autocomplete="current-password" placeholder="Password" required><button type="button" class="input-action" :aria-label="loginShowPassword ? '隐藏密码' : '显示密码'" @click="loginShowPassword = !loginShowPassword"><svg class="icon"><use :href="loginShowPassword ? '#icon-eye-off' : '#icon-eye'"></use></svg></button></span></label>
+            <div v-if="loginError" class="inline-alert"><svg class="icon"><use href="#icon-alert"></use></svg><span>{{ loginError }}</span></div>
+            <button type="submit" class="button button-primary button-large login-submit" :disabled="loginBusy"><span>{{ loginBusy ? '正在验证…' : '登录' }}</span><svg class="icon"><use href="#icon-arrow-right"></use></svg></button>
+          </form>
+          <div class="login-footnote"><svg class="icon"><use href="#icon-server"></use></svg><span>ProxyNetworker Server</span></div>
         </div>
-        <form class="stack" @submit.prevent="login">
-          <label>
-            账号
-            <input v-model.trim="loginForm.username" autocomplete="username" required>
-          </label>
-          <label>
-            密码
-            <input v-model="loginForm.password" type="password" autocomplete="current-password" required>
-          </label>
-          <button type="submit" class="primary">登录</button>
-          <p class="error">{{ loginError }}</p>
-        </form>
       </section>
     </main>
 
-    <main v-else-if="sessionChecked && me" class="app-shell">
-      <aside class="sidebar">
-        <div class="brand">
-          <strong>ProxyNetworker</strong>
-          <span>{{ sessionLabel }}</span>
+    <main v-else-if="sessionChecked && me" class="console-shell">
+      <transition name="fade"><button v-if="mobileNavOpen" class="mobile-nav-backdrop" aria-label="关闭导航" @click="mobileNavOpen = false"></button></transition>
+      <aside class="sidebar" :class="{ 'is-open': mobileNavOpen }">
+        <div class="sidebar-header">
+          <div class="brand-lockup brand-lockup-light"><span class="brand-mark" aria-hidden="true"><i></i><i></i></span><span><strong>ProxyNetworker</strong><small>CONTROL PLANE</small></span></div>
+          <button class="icon-button sidebar-close" type="button" aria-label="关闭导航" @click="mobileNavOpen = false"><svg class="icon"><use href="#icon-close"></use></svg></button>
         </div>
-        <nav class="nav">
-          <button
-            v-for="tab in visibleTabs"
-            :key="tab.key"
-            type="button"
-            :class="{ active: selectedTab === tab.key }"
-            @click="switchTab(tab.key)">
-            {{ tab.title }}
-          </button>
+        <nav class="main-nav">
+          <div v-for="section in visibleNavSections" :key="section.label" class="nav-section">
+            <p>{{ section.label }}</p>
+            <button v-for="tab in section.items" :key="tab.key" type="button" class="nav-item" :class="{ active: selectedTab === tab.key }" @click="switchTab(tab.key); mobileNavOpen = false">
+              <svg class="icon"><use :href="'#icon-' + tab.icon"></use></svg><span>{{ tab.title }}</span><span v-if="navCount(tab.key) !== null" class="nav-count">{{ navCount(tab.key) }}</span>
+            </button>
+          </div>
         </nav>
-        <div class="sidebar-actions">
-          <button type="button" @click="openPasswordDialog">修改密码</button>
-          <button type="button" @click="logout">退出</button>
+        <div class="sidebar-footer">
+          <div class="server-state"><span class="signal-dot"></span><div><strong>服务已连接</strong><small>CONTROL PLANE READY</small></div></div>
+          <div class="account-card">
+            <span class="avatar">{{ initials(me.username) }}</span>
+            <div class="account-copy"><strong>{{ me.username }}</strong><span>{{ isAdmin ? '管理员' : '普通用户' }}</span></div>
+            <button class="icon-button icon-button-dark" type="button" title="修改密码" aria-label="修改密码" @click="openPasswordDialog"><svg class="icon"><use href="#icon-key"></use></svg></button>
+            <button class="icon-button icon-button-dark" type="button" title="退出登录" aria-label="退出登录" @click="logout"><svg class="icon"><use href="#icon-logout"></use></svg></button>
+          </div>
         </div>
       </aside>
 
       <section class="workspace">
-        <header class="topbar">
-          <div>
-            <p class="eyebrow">Management</p>
-            <h2>{{ pageTitle }}</h2>
+        <header class="page-header">
+          <div class="page-heading">
+            <div class="page-overline">
+              <button class="mobile-nav-trigger" type="button" aria-label="打开导航" @click="mobileNavOpen = true"><svg class="icon"><use href="#icon-menu"></use></svg></button>
+              <span class="signal-dot"></span><span>CONTROL PLANE</span><span class="page-overline-divider">/</span><span>{{ pageCode }}</span>
+            </div>
+            <h1>{{ pageTitle }}</h1><p>{{ pageDescription }}</p>
           </div>
-          <p class="status-text" :style="{ color: statusIsError ? 'var(--danger)' : 'var(--muted)' }">{{ statusMessage }}</p>
+          <div class="page-actions">
+            <span class="last-updated">{{ lastUpdatedLabel }}</span>
+            <button class="button button-secondary" type="button" :disabled="isRefreshing" @click="refreshAll"><svg class="icon" :class="{ spinning: isRefreshing }"><use href="#icon-refresh"></use></svg><span>刷新</span></button>
+            <button v-if="primaryActionLabel" class="button button-primary" type="button" @click="openPrimaryCreate"><svg class="icon"><use href="#icon-plus"></use></svg><span>{{ primaryActionLabel }}</span></button>
+          </div>
         </header>
 
-        <section class="tab-panel" :class="{ active: selectedTab === 'overview' }">
-          <div class="metric-grid">
-            <div class="metric"><span>用户</span><strong>{{ users.length }}</strong></div>
-            <div class="metric"><span>虚拟局域网</span><strong>{{ virtualNetworks.length }}</strong></div>
-            <div class="metric"><span>内网穿透</span><strong>{{ portTunnels.length }}</strong></div>
-            <div class="metric"><span>访问 Token</span><strong>{{ tokens.length }}</strong></div>
+        <transition name="toast">
+          <div v-if="statusMessage" class="toast" :class="{ 'is-error': statusIsError }" role="status">
+            <svg class="icon"><use :href="statusIsError ? '#icon-alert' : '#icon-check'"></use></svg><span>{{ statusMessage }}</span>
+            <button type="button" aria-label="关闭提示" @click="statusMessage = ''"><svg class="icon"><use href="#icon-close"></use></svg></button>
           </div>
-          <div class="section-row">
-            <section>
-              <h3>运行中隧道</h3>
-              <table>
-                <thead><tr><th>名称</th><th>类型</th><th>协议</th><th>入口</th><th>状态</th></tr></thead>
-                <tbody>
-                  <tr v-for="item in runtimeTunnels" :key="item.id || item.name">
-                    <td>{{ item.name }}</td>
-                    <td>{{ item.kind }}</td>
-                    <td>{{ item.protocol || '-' }}</td>
-                    <td>{{ item.publicEndpoint }}</td>
-                    <td>{{ item.status }}</td>
-                  </tr>
-                  <tr v-if="!runtimeTunnels.length"><td colspan="5" class="muted">暂无运行中隧道</td></tr>
-                </tbody>
-              </table>
+        </transition>
+
+        <transition name="page" mode="out-in">
+          <div :key="selectedTab" class="page-content">
+            <section v-if="selectedTab === 'overview'" class="page-section">
+              <div class="overview-control">
+                <div class="overview-copy">
+                  <p class="overline">NETWORK OPERATIONS</p>
+                  <h2>{{ runtimeTunnels.length ? '链路运行正常' : '等待链路接入' }}</h2>
+                  <p>{{ runtimeTunnels.length ? `${runtimeTunnels.length} 条链路正在承载流量。` : '当前没有活动链路，资源定义仍然可用。' }}</p>
+                  <div class="overview-status-row"><span class="status-chip status-chip-live"><span class="signal-dot"></span>服务在线</span><span class="overview-meta">{{ me.username }} · {{ isAdmin ? 'ADMIN' : 'USER' }}</span></div>
+                </div>
+                <div class="overview-readout">
+                  <div><span>ACTIVE LINKS</span><strong>{{ runtimeTunnels.length }}</strong></div>
+                  <div><span>RESOURCES</span><strong>{{ virtualNetworks.length + portTunnels.length }}</strong></div>
+                  <div><span>ACCOUNTS</span><strong>{{ users.length }}</strong></div>
+                </div>
+              </div>
+
+              <div class="metric-grid">
+                <button class="metric-card" type="button" @click="switchTab('users')" :disabled="!isAdmin"><span class="metric-icon tone-orange"><svg class="icon"><use href="#icon-users"></use></svg></span><span class="metric-copy"><span>用户账号</span><strong>{{ users.length }}</strong><small>{{ enabledUserCount }} 个启用</small></span><svg class="icon metric-arrow"><use href="#icon-arrow-up-right"></use></svg></button>
+                <button class="metric-card" type="button" @click="switchTab('virtualNetworks')"><span class="metric-icon tone-green"><svg class="icon"><use href="#icon-network"></use></svg></span><span class="metric-copy"><span>虚拟局域网</span><strong>{{ virtualNetworks.length }}</strong><small>RELAY NETWORKS</small></span><svg class="icon metric-arrow"><use href="#icon-arrow-up-right"></use></svg></button>
+                <button class="metric-card" type="button" @click="switchTab('portTunnels')"><span class="metric-icon tone-blue"><svg class="icon"><use href="#icon-route"></use></svg></span><span class="metric-copy"><span>内网穿透</span><strong>{{ portTunnels.length }}</strong><small>TCP / UDP</small></span><svg class="icon metric-arrow"><use href="#icon-arrow-up-right"></use></svg></button>
+                <button class="metric-card" type="button" @click="switchTab('tokens')"><span class="metric-icon tone-ink"><svg class="icon"><use href="#icon-key"></use></svg></span><span class="metric-copy"><span>当前资源 Token</span><strong>{{ tokens.length }}</strong><small>{{ tokenTypeSummary }}</small></span><svg class="icon metric-arrow"><use href="#icon-arrow-up-right"></use></svg></button>
+              </div>
+
+              <div class="overview-grid">
+                <section class="panel">
+                  <div class="panel-header"><div><span class="section-kicker">LIVE RUNTIME</span><h3>运行中的链路</h3></div><span class="panel-count">{{ runtimeTunnels.length }}</span></div>
+                  <div class="table-wrap">
+                    <table class="data-table">
+                      <thead><tr><th>链路</th><th>类型</th><th>协议</th><th>入口</th><th>状态</th></tr></thead>
+                      <tbody>
+                        <tr v-for="item in runtimeTunnels" :key="item.id || item.name"><td><strong>{{ item.name }}</strong></td><td><span class="tag">{{ item.kind }}</span></td><td><span class="code-text">{{ item.protocol || '—' }}</span></td><td><span class="code-text">{{ item.publicEndpoint }}</span></td><td><span class="status-chip status-chip-live"><span class="signal-dot"></span>{{ item.status }}</span></td></tr>
+                        <tr v-if="!runtimeTunnels.length"><td colspan="5" class="empty-cell"><span class="empty-inline"><svg class="icon"><use href="#icon-activity"></use></svg>暂无运行中的链路</span></td></tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+
+                <aside class="panel quick-panel">
+                  <div class="panel-header"><div><span class="section-kicker">QUICK ACTIONS</span><h3>快捷操作</h3></div></div>
+                  <div class="quick-actions">
+                    <button type="button" @click="openVirtualNetworkCreate"><svg class="icon"><use href="#icon-network"></use></svg><span>新建虚拟局域网</span><svg class="icon quick-arrow"><use href="#icon-arrow-right"></use></svg></button>
+                    <button type="button" @click="openPortTunnelCreate"><svg class="icon"><use href="#icon-route"></use></svg><span>创建内网穿透</span><svg class="icon quick-arrow"><use href="#icon-arrow-right"></use></svg></button>
+                    <button type="button" @click="switchTab('tokens')"><svg class="icon"><use href="#icon-key"></use></svg><span>签发访问 Token</span><svg class="icon quick-arrow"><use href="#icon-arrow-right"></use></svg></button>
+                    <button type="button" @click="openPasswordDialog"><svg class="icon"><use href="#icon-shield"></use></svg><span>修改登录密码</span><svg class="icon quick-arrow"><use href="#icon-arrow-right"></use></svg></button>
+                  </div>
+                  <div class="quick-facts">
+                    <div><span>公网端口范围</span><strong>{{ settings ? `${settings.publicPortRangeStart}–${settings.publicPortRangeEnd}` : '仅管理员可见' }}</strong></div>
+                    <div><span>带宽总量</span><strong>{{ settings ? fmtBytes(settings.maxBandwidthLimitBytes) : '—' }}</strong></div>
+                    <div><span>速度上限</span><strong>{{ settings ? `${fmtBytes(settings.maxTrafficSpeedBytesPerSecond)}/s` : '—' }}</strong></div>
+                  </div>
+                </aside>
+              </div>
+            </section>
+
+            <section v-else-if="selectedTab === 'users' && isAdmin" class="page-section">
+              <section class="panel">
+                <div class="section-toolbar">
+                  <label class="search-field"><svg class="icon"><use href="#icon-search"></use></svg><input id="user-search" name="userSearch" aria-label="搜索账号" v-model.trim="searchUsers" placeholder="搜索账号"></label>
+                  <span class="result-count">{{ filteredUsers.length }} 个账号</span>
+                </div>
+                <div class="table-wrap">
+                  <table class="data-table users-table">
+                    <thead><tr><th>用户</th><th>角色</th><th>资源配额</th><th>端口范围</th><th>流量限制</th><th>状态</th><th class="align-right">操作</th></tr></thead>
+                    <tbody>
+                      <tr v-for="user in filteredUsers" :key="user.id">
+                        <td><div class="identity-cell"><span class="avatar avatar-small">{{ initials(user.username) }}</span><span><strong>{{ user.username }}</strong><small v-if="user.id === me.id">当前账号</small><small v-else>{{ shortId(user.id) }}</small></span></div></td>
+                        <td><span class="tag" :class="user.role === 'Admin' ? 'tag-orange' : ''">{{ user.role === 'Admin' ? '管理员' : '普通用户' }}</span></td>
+                        <td><div class="stacked-value"><span>虚拟网 {{ fmtQuota(user.maxVirtualNetworks) }}</span><span>穿透 {{ fmtQuota(user.maxPortTunnels) }}</span></div></td>
+                        <td><span class="code-text">{{ user.portRangeStart }}–{{ user.portRangeEnd }}</span></td>
+                        <td><div class="stacked-value"><span>{{ fmtBytes(user.bandwidthLimitBytes) }}</span><span>{{ fmtBytes(user.maxTrafficSpeedBytesPerSecond) }}/s</span></div></td>
+                        <td><span class="status-chip" :class="user.isDisabled ? 'status-chip-muted' : 'status-chip-live'"><span class="signal-dot"></span>{{ user.isDisabled ? '已禁用' : '启用' }}</span></td>
+                        <td><div class="row-actions row-actions-end">
+                          <button class="icon-button" type="button" title="编辑用户" aria-label="编辑用户" @click="openEditUser(user)"><svg class="icon"><use href="#icon-edit"></use></svg></button>
+                          <button class="icon-button" type="button" title="重置密码" aria-label="重置密码" @click="openResetPassword(user)"><svg class="icon"><use href="#icon-key"></use></svg></button>
+                          <button v-if="user.id !== me.id" class="icon-button icon-button-danger" type="button" title="删除用户" aria-label="删除用户" @click="requestDeleteUser(user)"><svg class="icon"><use href="#icon-trash"></use></svg></button>
+                        </div></td>
+                      </tr>
+                      <tr v-if="!filteredUsers.length"><td colspan="7" class="empty-cell"><span class="empty-inline"><svg class="icon"><use href="#icon-users"></use></svg>没有匹配的账号</span></td></tr>
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            </section>
+
+            <section v-else-if="selectedTab === 'virtualNetworks'" class="page-section">
+              <section class="panel">
+                <div class="section-toolbar">
+                  <label class="search-field"><svg class="icon"><use href="#icon-search"></use></svg><input id="network-search" name="networkSearch" aria-label="搜索虚拟局域网" v-model.trim="searchNetworks" placeholder="搜索虚拟局域网"></label>
+                  <span class="result-count">{{ filteredVirtualNetworks.length }} 个网络</span>
+                </div>
+                <div class="table-wrap">
+                  <table class="data-table">
+                    <thead><tr><th>网络</th><th>协议</th><th>状态</th><th>网关</th><th>所有者</th><th>创建时间</th><th class="align-right">操作</th></tr></thead>
+                    <tbody>
+                      <tr v-for="item in filteredVirtualNetworks" :key="item.id">
+                        <td><div class="resource-cell"><span class="resource-icon"><svg class="icon"><use href="#icon-network"></use></svg></span><span><strong>{{ item.name }}</strong><small>{{ shortId(item.id) }}</small></span></div></td>
+                        <td><span class="tag">{{ (item.transportProtocol || 'udp').toUpperCase() }}</span></td>
+                        <td><span class="status-chip" :class="item.isEnabled ? 'status-chip-live' : 'status-chip-muted'"><span class="signal-dot"></span>{{ item.isEnabled ? '运行中' : '已停用' }}</span></td>
+                        <td><span class="code-pill">{{ item.gatewayAddress }}/{{ item.prefixLength }}</span></td>
+                        <td>{{ ownerName(item.ownerUserId) }}</td>
+                        <td>{{ fmtDate(item.createdAt) }}</td>
+                        <td><div class="row-actions row-actions-end">
+                          <button class="button button-small button-secondary" type="button" @click="openVirtualNetworkDetails(item)"><svg class="icon"><use href="#icon-activity"></use></svg>详情</button>
+                          <button class="button button-small button-secondary" type="button" :disabled="dialogBusy" @click="toggleVirtualNetwork(item)"><svg class="icon"><use :href="item.isEnabled ? '#icon-pause' : '#icon-play'"></use></svg>{{ item.isEnabled ? '停用' : '启用' }}</button>
+                          <button class="button button-small button-secondary" type="button" @click="openTokenTab('VirtualNetwork', item.id)"><svg class="icon"><use href="#icon-key"></use></svg>Token</button>
+                          <button class="icon-button icon-button-danger" type="button" title="删除网络" aria-label="删除网络" @click="requestDeleteResource('VirtualNetwork', item.id, item.name)"><svg class="icon"><use href="#icon-trash"></use></svg></button>
+                        </div></td>
+                      </tr>
+                      <tr v-if="!filteredVirtualNetworks.length"><td colspan="7" class="empty-cell"><span class="empty-inline"><svg class="icon"><use href="#icon-network"></use></svg>没有匹配的虚拟局域网</span></td></tr>
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            </section>
+
+            <section v-else-if="selectedTab === 'portTunnels'" class="page-section">
+              <section class="panel">
+                <div class="section-toolbar">
+                  <label class="search-field"><svg class="icon"><use href="#icon-search"></use></svg><input id="tunnel-search" name="tunnelSearch" aria-label="搜索内网穿透" v-model.trim="searchTunnels" placeholder="搜索内网穿透"></label>
+                  <span class="result-count">{{ filteredPortTunnels.length }} 条穿透</span>
+                </div>
+                <div class="table-wrap">
+                  <table class="data-table">
+                    <thead><tr><th>通道</th><th>协议</th><th>路由</th><th>限速</th><th class="align-right">操作</th></tr></thead>
+                    <tbody>
+                      <tr v-for="item in filteredPortTunnels" :key="item.id">
+                        <td><div class="resource-cell"><span class="resource-icon resource-icon-blue"><svg class="icon"><use href="#icon-route"></use></svg></span><span><strong>{{ item.name }}</strong><small>{{ shortId(item.id) }}</small></span></div></td>
+                        <td><span class="tag" :class="item.protocol === 'udp' ? 'tag-blue' : 'tag-green'">{{ String(item.protocol || '').toUpperCase() }}</span></td>
+                        <td><div class="route-cell"><span class="code-text">{{ item.privateHost }}:{{ item.privatePort }}</span><svg class="icon"><use href="#icon-arrow-right"></use></svg><span class="code-pill">:{{ item.publicPort }}</span></div></td>
+                        <td>{{ fmtBytes(item.maxTrafficSpeedBytesPerSecond) }}/s</td>
+                        <td><div class="row-actions row-actions-end">
+                          <button class="button button-small button-secondary" type="button" @click="openTokenTab('PortTunnel', item.id)"><svg class="icon"><use href="#icon-key"></use></svg>Token</button>
+                          <button class="icon-button icon-button-danger" type="button" title="删除通道" aria-label="删除通道" @click="requestDeleteResource('PortTunnel', item.id, item.name)"><svg class="icon"><use href="#icon-trash"></use></svg></button>
+                        </div></td>
+                      </tr>
+                      <tr v-if="!filteredPortTunnels.length"><td colspan="5" class="empty-cell"><span class="empty-inline"><svg class="icon"><use href="#icon-route"></use></svg>没有匹配的内网穿透</span></td></tr>
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            </section>
+
+            <section v-else-if="selectedTab === 'tokens'" class="page-section">
+              <div class="token-context-bar">
+                <div class="segmented-control" role="group" aria-label="资源类型">
+                  <button type="button" :class="{ active: selectedTokenKind === 'VirtualNetwork' }" @click="selectedTokenKind = 'VirtualNetwork'; onTokenKindChanged()">虚拟局域网</button>
+                  <button type="button" :class="{ active: selectedTokenKind === 'PortTunnel' }" @click="selectedTokenKind = 'PortTunnel'; onTokenKindChanged()">内网穿透</button>
+                </div>
+                <label class="select-field token-resource-select">
+                  <span>资源</span>
+                  <select v-model="selectedTokenResourceId" :disabled="!tokenResourceItems.length" @change="onTokenResourceChanged">
+                    <option v-for="item in tokenResourceItems" :key="item.id" :value="item.id">{{ item.name }}</option>
+                    <option v-if="!tokenResourceItems.length" :value="null">暂无资源</option>
+                  </select>
+                </label>
+              </div>
+
+              <div v-if="plainToken" class="plain-token-panel">
+                <div class="plain-token-icon"><svg class="icon"><use href="#icon-key"></use></svg></div>
+                <div class="plain-token-copy"><span>ACCESS TOKEN</span><code ref="plainTokenValue">{{ plainToken }}</code></div>
+                <button class="button button-secondary button-small" type="button" @click="copyText(plainToken, 'Token 已复制')"><svg class="icon"><use href="#icon-copy"></use></svg>复制</button>
+                <button class="icon-button" type="button" aria-label="关闭 Token 显示" @click="hidePlainToken"><svg class="icon"><use href="#icon-close"></use></svg></button>
+              </div>
+
+              <div class="token-layout">
+                <aside class="panel token-create-panel">
+                  <div class="panel-header"><div><span class="section-kicker">ISSUE CREDENTIAL</span><h3>创建访问 Token</h3></div><span class="resource-icon"><svg class="icon"><use href="#icon-key"></use></svg></span></div>
+                  <form class="stack-form" @submit.prevent="createToken">
+                    <label class="field"><span>Token 类型</span><select v-model="tokenForm.tokenType"><option v-for="item in tokenTypeOptions" :key="item.value" :value="item.value">{{ item.label }}</option></select></label>
+                    <div v-if="tokenForm.tokenType !== 'Permanent'" class="field-pair">
+                      <label class="field"><span>生效时间</span><input v-model="tokenForm.validFrom" type="datetime-local"></label>
+                      <label class="field"><span>失效时间</span><input v-model="tokenForm.validUntil" type="datetime-local"></label>
+                    </div>
+                    <button class="button button-primary button-full" type="submit" :disabled="!selectedTokenResourceId || dialogBusy"><svg class="icon"><use href="#icon-plus"></use></svg><span>签发 Token</span></button>
+                  </form>
+                  <div class="token-panel-note"><svg class="icon"><use href="#icon-shield"></use></svg><span>Token 完整值仅在创建后解密显示。</span></div>
+                </aside>
+
+                <section class="panel token-list-panel">
+                  <div class="panel-header"><div><span class="section-kicker">CREDENTIAL REGISTRY</span><h3>已签发 Token</h3></div><span class="panel-count">{{ filteredTokens.length }}</span></div>
+                  <div class="section-toolbar section-toolbar-compact"><label class="search-field"><svg class="icon"><use href="#icon-search"></use></svg><input id="token-search" name="tokenSearch" aria-label="搜索 Token" v-model.trim="searchTokens" placeholder="搜索 Token"></label></div>
+                  <div class="table-wrap">
+                    <table class="data-table">
+                      <thead><tr><th>预览</th><th>类型</th><th>有效期</th><th>状态</th><th class="align-right">操作</th></tr></thead>
+                      <tbody>
+                        <tr v-for="item in filteredTokens" :key="item.id">
+                          <td><span class="code-text">{{ item.tokenPreview }}</span></td>
+                          <td><span class="tag">{{ tokenTypeLabel(item.tokenType) }}</span></td>
+                          <td><span>{{ tokenValidityLabel(item) }}</span></td>
+                          <td><span class="status-chip" :class="item.isConsumed ? 'status-chip-muted' : 'status-chip-live'"><span class="signal-dot"></span>{{ item.isConsumed ? '已使用' : '可用' }}</span></td>
+                          <td><div class="row-actions row-actions-end">
+                            <button class="icon-button" type="button" title="复制完整 Token" aria-label="复制完整 Token" @click="copyStoredToken(item.id)"><svg class="icon"><use href="#icon-copy"></use></svg></button>
+                            <button class="icon-button icon-button-danger" type="button" title="删除 Token" aria-label="删除 Token" @click="requestDeleteToken(item)"><svg class="icon"><use href="#icon-trash"></use></svg></button>
+                          </div></td>
+                        </tr>
+                        <tr v-if="!filteredTokens.length"><td colspan="5" class="empty-cell"><span class="empty-inline"><svg class="icon"><use href="#icon-key"></use></svg>当前资源没有 Token</span></td></tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+              </div>
+            </section>
+
+            <section v-else-if="selectedTab === 'settings' && isAdmin" class="page-section">
+              <form class="panel settings-panel" @submit.prevent="updateSettings">
+                <div class="panel-header settings-header"><div><span class="section-kicker">SYSTEM BOUNDARY</span><h3>系统限制</h3></div><span class="settings-updated"><svg class="icon"><use href="#icon-clock"></use></svg>{{ settings ? fmtDate(settings.updatedAt) : '尚未加载' }}</span></div>
+                <div class="settings-section">
+                  <div class="settings-section-heading"><span>01</span><div><h4>公网端口边界</h4><p>资源可分配的公网端口范围。</p></div></div>
+                  <div class="field-pair"><label class="field"><span>起始端口</span><input v-model.number="settingsForm.publicPortRangeStart" type="number" min="1" max="65535" required></label><label class="field"><span>结束端口</span><input v-model.number="settingsForm.publicPortRangeEnd" type="number" min="1" max="65535" required></label></div>
+                </div>
+                <div class="settings-section">
+                  <div class="settings-section-heading"><span>02</span><div><h4>流量限制</h4><p>值为 0 时表示系统不设上限。</p></div></div>
+                  <div class="field-pair"><label class="field"><span>带宽总量上限 (B)</span><input v-model.number="settingsForm.maxBandwidthLimitBytes" type="number" min="0" required></label><label class="field"><span>速度上限 (B/s)</span><input v-model.number="settingsForm.maxTrafficSpeedBytesPerSecond" type="number" min="0" required></label></div>
+                </div>
+                <div class="settings-actions"><button class="button button-primary" type="submit" :disabled="dialogBusy"><svg class="icon"><use href="#icon-check"></use></svg><span>保存系统设置</span></button></div>
+              </form>
             </section>
           </div>
-        </section>
-
-        <section v-if="isAdmin" class="tab-panel" :class="{ active: selectedTab === 'users' }">
-          <form class="form-grid" @submit.prevent="createUser">
-            <label><span>账号</span><input v-model.trim="userForm.username" required></label>
-            <label><span>初始密码</span><input v-model="userForm.password" required></label>
-            <label>
-              <span>角色</span>
-              <select v-model="userForm.role">
-                <option value="User">普通用户</option>
-                <option value="Admin">管理员</option>
-              </select>
-            </label>
-            <label><span>虚拟局域网配额</span><input v-model.number="userForm.maxVirtualNetworks" type="number" min="0"></label>
-            <label><span>内网穿透配额</span><input v-model.number="userForm.maxPortTunnels" type="number" min="0"></label>
-            <label><span>外网端口起始</span><input v-model.number="userForm.portRangeStart" type="number" :min="userPortMin" :max="userPortMax"></label>
-            <label><span>外网端口结束</span><input v-model.number="userForm.portRangeEnd" type="number" :min="userPortMin" :max="userPortMax"></label>
-            <label><span>带宽总量上限 (B)</span><input v-model.number="userForm.bandwidthLimitBytes" type="number" min="0" :max="bandwidthMax || null"></label>
-            <label><span>速度上限 (B/s)</span><input v-model.number="userForm.maxTrafficSpeedBytesPerSecond" type="number" min="0" :max="speedMax || null"></label>
-            <button type="submit" class="primary">创建用户</button>
-          </form>
-          <table>
-            <thead><tr><th>账号</th><th>角色</th><th>状态</th><th>虚拟网</th><th>隧道</th><th>外网端口范围</th><th>带宽总量</th><th>速度上限</th><th>操作</th></tr></thead>
-            <tbody>
-              <tr v-for="user in users" :key="user.id">
-                <td>{{ user.username }}</td>
-                <td>
-                  <select v-model="user.role">
-                    <option value="User">普通用户</option>
-                    <option value="Admin">管理员</option>
-                  </select>
-                </td>
-                <td><label><input v-model="user.isDisabled" type="checkbox"> 禁用</label></td>
-                <td><input v-model.number="user.maxVirtualNetworks" type="number" min="0"></td>
-                <td><input v-model.number="user.maxPortTunnels" type="number" min="0"></td>
-                <td class="port-range">
-                  <input v-model.number="user.portRangeStart" type="number" :min="userPortMin" :max="userPortMax">
-                  <span>-</span>
-                  <input v-model.number="user.portRangeEnd" type="number" :min="userPortMin" :max="userPortMax">
-                </td>
-                <td><input v-model.number="user.bandwidthLimitBytes" type="number" min="0" :max="bandwidthMax || null"></td>
-                <td><input v-model.number="user.maxTrafficSpeedBytesPerSecond" type="number" min="0" :max="speedMax || null"></td>
-                <td>
-                  <div class="row-actions">
-                    <button type="button" @click="saveUser(user)">保存</button>
-                    <button type="button" @click="resetUserPassword(user)">重置密码</button>
-                    <span v-if="user.id === me.id" class="muted">当前账号</span>
-                    <button v-else type="button" class="danger" @click="deleteUser(user)">删除</button>
-                  </div>
-                </td>
-              </tr>
-              <tr v-if="!users.length"><td colspan="9" class="muted">暂无用户</td></tr>
-            </tbody>
-          </table>
-        </section>
-
-        <section class="tab-panel" :class="{ active: selectedTab === 'virtualNetworks' }">
-          <form class="form-grid compact" @submit.prevent="createVirtualNetwork">
-            <input v-model.trim="virtualNetworkForm.name" placeholder="名称" required>
-            <input v-model.trim="virtualNetworkForm.gatewayAddress" placeholder="网关地址" required>
-            <input v-model.number="virtualNetworkForm.prefixLength" type="number" min="1" max="32" required>
-            <button type="submit" class="primary">创建虚拟局域网</button>
-          </form>
-          <table>
-            <thead><tr><th>名称</th><th>网关</th><th>前缀</th><th>所有者</th><th>创建时间</th><th>操作</th></tr></thead>
-            <tbody>
-              <tr v-for="item in virtualNetworks" :key="item.id">
-                <td>{{ item.name }}</td>
-                <td>{{ item.gatewayAddress }}</td>
-                <td>/{{ item.prefixLength }}</td>
-                <td>{{ ownerName(item.ownerUserId) }}</td>
-                <td>{{ fmtDate(item.createdAt) }}</td>
-                <td>
-                  <div class="row-actions">
-                    <button type="button" @click="openTokenTab('VirtualNetwork', item.id)">Token</button>
-                    <button type="button" class="danger" @click="deleteResource('VirtualNetwork', item.id, item.name)">删除</button>
-                  </div>
-                </td>
-              </tr>
-              <tr v-if="!virtualNetworks.length"><td colspan="6" class="muted">暂无虚拟局域网</td></tr>
-            </tbody>
-          </table>
-        </section>
-
-        <section class="tab-panel" :class="{ active: selectedTab === 'portTunnels' }">
-          <form class="form-grid compact" @submit.prevent="createPortTunnel">
-            <input v-model.trim="portTunnelForm.name" placeholder="名称" required>
-            <select v-model="portTunnelForm.protocol"><option value="tcp">TCP</option><option value="udp">UDP</option></select>
-            <input v-model.trim="portTunnelForm.privateHost" placeholder="内网地址" required>
-            <input v-model.number="portTunnelForm.privatePort" type="number" min="1" max="65535" placeholder="内网端口" required>
-            <button type="submit" class="primary">创建内网穿透</button>
-          </form>
-          <table>
-            <thead><tr><th>名称</th><th>协议</th><th>内网端口</th><th>服务器端口</th><th>限速</th><th>操作</th></tr></thead>
-            <tbody>
-              <tr v-for="item in portTunnels" :key="item.id">
-                <td>{{ item.name }}</td>
-                <td>{{ String(item.protocol || '').toUpperCase() }}</td>
-                <td>{{ item.privateHost }}:{{ item.privatePort }}</td>
-                <td>{{ item.publicPort }}</td>
-                <td>{{ fmtBytes(item.maxTrafficSpeedBytesPerSecond) }}/s</td>
-                <td>
-                  <div class="row-actions">
-                    <button type="button" @click="openTokenTab('PortTunnel', item.id)">Token</button>
-                    <button type="button" class="danger" @click="deleteResource('PortTunnel', item.id, item.name)">删除</button>
-                  </div>
-                </td>
-              </tr>
-              <tr v-if="!portTunnels.length"><td colspan="6" class="muted">暂无内网穿透</td></tr>
-            </tbody>
-          </table>
-        </section>
-
-        <section class="tab-panel" :class="{ active: selectedTab === 'tokens' }">
-          <div class="toolbar">
-            <select v-model="selectedTokenKind" @change="onTokenKindChanged">
-              <option value="VirtualNetwork">虚拟局域网</option>
-              <option value="PortTunnel">内网穿透</option>
-            </select>
-            <select v-model="selectedTokenResourceId" :disabled="!tokenResourceItems.length" @change="onTokenResourceChanged">
-              <option v-for="item in tokenResourceItems" :key="item.id" :value="item.id">{{ item.name }}</option>
-            </select>
-            <select v-model="tokenForm.tokenType">
-              <option v-for="item in tokenTypeOptions" :key="item.value" :value="item.value">{{ item.label }}</option>
-            </select>
-            <input v-model="tokenForm.validFrom" type="datetime-local">
-            <input v-model="tokenForm.validUntil" type="datetime-local">
-            <button type="button" class="primary" :disabled="!selectedTokenResourceId" @click="createToken">创建 Token</button>
-          </div>
-          <div v-if="plainToken" class="token-box">
-            <div>
-              <span class="muted">完整 Token 已保存，可稍后复制</span>
-              <code ref="plainTokenValue">{{ plainToken }}</code>
-            </div>
-            <button type="button" @click="copyText(plainToken, 'Token 已复制')">复制</button>
-          </div>
-          <table>
-            <thead><tr><th>资源</th><th>类型</th><th>预览</th><th>时间段</th><th>状态</th><th>操作</th></tr></thead>
-            <tbody>
-              <tr v-for="item in tokens" :key="item.id">
-                <td>{{ item.scopeKind }}</td>
-                <td>{{ item.tokenType }}</td>
-                <td>{{ item.tokenPreview }}</td>
-                <td>{{ fmtDate(item.validFrom) }} - {{ fmtDate(item.validUntil) }}</td>
-                <td>{{ item.isConsumed ? '已使用' : '可用' }}</td>
-                <td>
-                  <div class="row-actions">
-                    <button type="button" :title="item.hasStoredValue ? '复制完整 Token' : '旧 Token 未保存完整值，点击后会显示原因'" @click="copyStoredToken(item.id)">复制</button>
-                    <button type="button" class="danger" @click="deleteToken(item)">删除</button>
-                  </div>
-                </td>
-              </tr>
-              <tr v-if="!tokens.length"><td colspan="6" class="muted">暂无 Token</td></tr>
-            </tbody>
-          </table>
-        </section>
-
-        <section v-if="isAdmin" class="tab-panel" :class="{ active: selectedTab === 'settings' }">
-          <form class="form-grid compact" @submit.prevent="updateSettings">
-            <label><span>系统外网端口起始</span><input v-model.number="settingsForm.publicPortRangeStart" type="number" min="1" max="65535" required></label>
-            <label><span>系统外网端口结束</span><input v-model.number="settingsForm.publicPortRangeEnd" type="number" min="1" max="65535" required></label>
-            <label><span>系统带宽总量上限 (B)</span><input v-model.number="settingsForm.maxBandwidthLimitBytes" type="number" min="0" required></label>
-            <label><span>系统速度上限 (B/s)</span><input v-model.number="settingsForm.maxTrafficSpeedBytesPerSecond" type="number" min="0" required></label>
-            <button type="submit" class="primary">保存设置</button>
-          </form>
-          <table>
-            <thead><tr><th>外网端口范围</th><th>带宽总量上限</th><th>速度上限</th><th>更新时间</th></tr></thead>
-            <tbody>
-              <tr v-if="settings">
-                <td>{{ settings.publicPortRangeStart }} - {{ settings.publicPortRangeEnd }}</td>
-                <td>{{ fmtBytes(settings.maxBandwidthLimitBytes) }}</td>
-                <td>{{ fmtBytes(settings.maxTrafficSpeedBytesPerSecond) }}/s</td>
-                <td>{{ fmtDate(settings.updatedAt) }}</td>
-              </tr>
-              <tr v-else><td colspan="4" class="muted">仅管理员可见</td></tr>
-            </tbody>
-          </table>
-        </section>
+        </transition>
       </section>
     </main>
 
-    <dialog ref="passwordDialog">
-      <form class="stack dialog-body" @submit.prevent="changePassword">
-        <h3>修改密码</h3>
-        <input v-model="passwordForm.currentPassword" type="password" autocomplete="current-password" placeholder="当前密码" required>
-        <input v-model="passwordForm.newPassword" type="password" autocomplete="new-password" placeholder="新密码" required>
-        <div class="dialog-actions">
-          <button type="button" value="cancel" @click="closePasswordDialog">取消</button>
-          <button class="primary" type="submit" value="default">保存</button>
-        </div>
-      </form>
-    </dialog>
-  </div>
+    <transition name="fade">
+      <div v-if="isDrawerOpen" class="dialog-layer" @mousedown.self="closeDialog">
+        <aside class="drawer-panel" role="dialog" aria-modal="true" :aria-label="dialogTitle">
+          <header class="drawer-header">
+            <div><span class="section-kicker">{{ dialogKicker }}</span><h2>{{ dialogTitle }}</h2><p v-if="dialogDescription">{{ dialogDescription }}</p></div>
+            <button class="icon-button" type="button" aria-label="关闭" @click="closeDialog"><svg class="icon"><use href="#icon-close"></use></svg></button>
+          </header>
 
+          <form v-if="activeDialog === 'userCreate' || activeDialog === 'userEdit'" class="drawer-form" @submit.prevent="submitUser">
+            <div class="drawer-section">
+              <div class="drawer-section-title"><span>01</span><h4>账号信息</h4></div>
+              <label class="field"><span>账号</span><input v-model.trim="userEditor.username" :disabled="activeDialog === 'userEdit'" required></label>
+              <label v-if="activeDialog === 'userCreate'" class="field"><span>初始密码</span><input v-model="userEditor.password" type="password" autocomplete="new-password" required></label>
+              <label class="field"><span>角色</span><select v-model="userEditor.role"><option value="User">普通用户</option><option value="Admin">管理员</option></select></label>
+            </div>
+            <div class="drawer-section">
+              <div class="drawer-section-title"><span>02</span><h4>资源配额</h4></div>
+              <div class="field-pair"><label class="field"><span>虚拟局域网</span><input v-model.number="userEditor.maxVirtualNetworks" type="number" min="0"></label><label class="field"><span>内网穿透</span><input v-model.number="userEditor.maxPortTunnels" type="number" min="0"></label></div>
+              <div class="field-pair"><label class="field"><span>端口起始</span><input v-model.number="userEditor.portRangeStart" type="number" :min="userPortMin" :max="userPortMax"></label><label class="field"><span>端口结束</span><input v-model.number="userEditor.portRangeEnd" type="number" :min="userPortMin" :max="userPortMax"></label></div>
+            </div>
+            <div class="drawer-section">
+              <div class="drawer-section-title"><span>03</span><h4>流量额度</h4></div>
+              <label class="field"><span>带宽总量上限 (B)</span><input v-model.number="userEditor.bandwidthLimitBytes" type="number" min="0" :max="bandwidthMax || null"></label>
+              <label class="field"><span>速度上限 (B/s)</span><input v-model.number="userEditor.maxTrafficSpeedBytesPerSecond" type="number" min="0" :max="speedMax || null"></label>
+              <label v-if="activeDialog === 'userEdit'" class="check-field"><input v-model="userEditor.isDisabled" type="checkbox"><span>禁用此账号</span></label>
+            </div>
+            <footer class="drawer-actions"><button class="button button-secondary" type="button" @click="closeDialog">取消</button><button class="button button-primary" type="submit" :disabled="dialogBusy"><svg class="icon"><use href="#icon-check"></use></svg>{{ dialogBusy ? '保存中…' : '保存用户' }}</button></footer>
+          </form>
+
+          <form v-else-if="activeDialog === 'virtualNetworkCreate'" class="drawer-form" @submit.prevent="createVirtualNetwork">
+            <div class="drawer-section">
+              <div class="drawer-section-title"><span>01</span><h4>网络定义</h4></div>
+              <label class="field"><span>名称</span><input v-model.trim="virtualNetworkForm.name" placeholder="例如 office-mesh" required></label>
+              <label class="field"><span>网关地址</span><input v-model.trim="virtualNetworkForm.gatewayAddress" placeholder="10.66.0.1" required></label>
+              <label class="field"><span>前缀长度</span><input v-model.number="virtualNetworkForm.prefixLength" type="number" min="1" max="32" required></label>
+              <label class="field"><span>通信协议</span><select v-model="virtualNetworkForm.transportProtocol"><option value="udp">UDP · 智能直连/中继</option><option value="quic">QUIC · 可靠流式中继</option></select></label>
+            </div>
+            <footer class="drawer-actions"><button class="button button-secondary" type="button" @click="closeDialog">取消</button><button class="button button-primary" type="submit" :disabled="dialogBusy"><svg class="icon"><use href="#icon-plus"></use></svg>{{ dialogBusy ? '创建中…' : '创建网络' }}</button></footer>
+          </form>
+
+          <form v-else-if="activeDialog === 'portTunnelCreate'" class="drawer-form" @submit.prevent="createPortTunnel">
+            <div class="drawer-section">
+              <div class="drawer-section-title"><span>01</span><h4>通道定义</h4></div>
+              <label class="field"><span>名称</span><input v-model.trim="portTunnelForm.name" placeholder="例如 home-web" required></label>
+              <label class="field"><span>协议</span><select v-model="portTunnelForm.protocol"><option value="tcp">TCP</option><option value="udp">UDP</option></select></label>
+            </div>
+            <div class="drawer-section">
+              <div class="drawer-section-title"><span>02</span><h4>内网目标</h4></div>
+              <label class="field"><span>目标地址</span><input v-model.trim="portTunnelForm.privateHost" placeholder="127.0.0.1" required></label>
+              <label class="field"><span>目标端口</span><input v-model.number="portTunnelForm.privatePort" type="number" min="1" max="65535" placeholder="8080" required></label>
+            </div>
+            <footer class="drawer-actions"><button class="button button-secondary" type="button" @click="closeDialog">取消</button><button class="button button-primary" type="submit" :disabled="dialogBusy"><svg class="icon"><use href="#icon-plus"></use></svg>{{ dialogBusy ? '创建中…' : '创建通道' }}</button></footer>
+          </form>
+        </aside>
+      </div>
+    </transition>
+
+    <transition name="fade">
+      <div v-if="isCenterDialogOpen" class="dialog-layer dialog-layer-center" @mousedown.self="closeDialog">
+        <section class="dialog-panel" :class="{ 'dialog-panel-wide': activeDialog === 'virtualNetworkDetails' }" role="dialog" aria-modal="true" :aria-label="dialogTitle">
+          <header class="dialog-header"><div><span class="section-kicker">{{ dialogKicker }}</span><h2>{{ dialogTitle }}</h2><p v-if="dialogDescription">{{ dialogDescription }}</p></div><button class="icon-button" type="button" aria-label="关闭" @click="closeDialog"><svg class="icon"><use href="#icon-close"></use></svg></button></header>
+
+          <form v-if="activeDialog === 'password'" class="stack-form dialog-form" @submit.prevent="changePassword">
+            <label class="field"><span>当前密码</span><input v-model="passwordForm.currentPassword" type="password" autocomplete="current-password" required autofocus></label>
+            <label class="field"><span>新密码</span><input v-model="passwordForm.newPassword" type="password" autocomplete="new-password" required></label>
+            <footer class="dialog-actions"><button class="button button-secondary" type="button" @click="closeDialog">取消</button><button class="button button-primary" type="submit" :disabled="dialogBusy">保存密码</button></footer>
+          </form>
+
+          <form v-else-if="activeDialog === 'resetPassword'" class="stack-form dialog-form" @submit.prevent="submitResetPassword">
+            <div class="dialog-identity"><span class="avatar avatar-small">{{ initials(resettingUser?.username) }}</span><div><strong>{{ resettingUser?.username }}</strong><span>设置新的登录密码</span></div></div>
+            <label class="field"><span>新密码</span><input v-model="passwordResetForm.newPassword" type="password" autocomplete="new-password" required autofocus></label>
+            <label class="field"><span>确认新密码</span><input v-model="passwordResetForm.confirmPassword" type="password" autocomplete="new-password" required></label>
+            <footer class="dialog-actions"><button class="button button-secondary" type="button" @click="closeDialog">取消</button><button class="button button-primary" type="submit" :disabled="dialogBusy">重置密码</button></footer>
+          </form>
+
+          <div v-else-if="activeDialog === 'virtualNetworkDetails'" class="vn-detail-dialog">
+            <div class="vn-detail-toolbar">
+              <div class="vn-summary-grid">
+                <div><span>ONLINE NODES</span><strong>{{ virtualNetworkStatus?.onlineNodeCount ?? 0 }}</strong></div>
+                <div><span>TOKENS</span><strong>{{ virtualNetworkStatus?.tokens?.length ?? 0 }}</strong></div>
+                <div><span>HISTORY</span><strong>{{ virtualNetworkStatus?.recentSessions?.length ?? 0 }}</strong></div>
+              </div>
+              <button class="button button-secondary button-small" type="button" :disabled="networkDetailsLoading" @click="loadVirtualNetworkStatus(detailsNetwork?.id)"><svg class="icon"><use href="#icon-activity"></use></svg>{{ networkDetailsLoading ? '刷新中…' : '刷新' }}</button>
+            </div>
+            <div v-if="virtualNetworkStatus && !virtualNetworkStatus.isEnabled" class="danger-callout"><svg class="icon"><use href="#icon-alert"></use></svg><span>该虚拟局域网已停用，所有节点连接都会被拒绝。</span></div>
+
+            <section class="vn-detail-section">
+              <div class="vn-section-heading"><div><span class="section-kicker">LIVE DEVICES</span><h3>在线节点</h3></div><span class="panel-count">{{ virtualNetworkStatus?.onlineNodeCount ?? 0 }}</span></div>
+              <div class="table-wrap">
+                <table class="data-table vn-nodes-table">
+                  <thead><tr><th>设备</th><th>虚拟 IP</th><th>系统</th><th>Token</th><th>公网端点</th><th>最后心跳</th><th class="align-right">操作</th></tr></thead>
+                  <tbody>
+                    <tr v-for="node in virtualNetworkStatus?.onlineNodes || []" :key="node.virtualAddress">
+                      <td data-label="设备"><div class="resource-cell"><span class="resource-icon"><svg class="icon"><use href="#icon-network"></use></svg></span><span><strong>{{ node.nodeName || node.machineName || '未命名节点' }}</strong><small>{{ node.machineName || shortId(node.virtualAddress) }}</small></span></div></td>
+                      <td data-label="虚拟 IP"><span class="code-pill">{{ node.virtualAddress }}</span></td>
+                      <td data-label="系统"><div class="vn-device-stack"><strong>{{ node.osArchitecture }} / {{ node.processArchitecture }}</strong><small>{{ node.osDescription }}</small><small>Client {{ node.clientVersion }}</small></div></td>
+                      <td data-label="Token"><div class="vn-device-stack"><strong>{{ node.tokenPreview || '未关联' }}</strong><small>{{ shortId(node.tokenId) }}</small></div></td>
+                      <td data-label="公网端点"><span class="code-text">{{ node.publicEndpoint }}</span></td>
+                      <td data-label="最后心跳">{{ fmtDate(node.lastSeenAt) }}</td>
+                      <td data-label="操作"><button class="button button-small button-danger" type="button" :disabled="dialogBusy" @click="banVirtualNetworkNode(detailsNetwork.id, node.virtualAddress)">封禁</button></td>
+                    </tr>
+                    <tr v-if="!(virtualNetworkStatus?.onlineNodes || []).length" class="vn-empty-row"><td colspan="7" class="empty-cell"><span class="empty-inline"><svg class="icon"><use href="#icon-activity"></use></svg>当前没有在线节点</span></td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+
+            <section v-if="(virtualNetworkStatus?.bannedNodes || []).length" class="vn-detail-section">
+              <div class="vn-section-heading"><div><span class="section-kicker">ACCESS CONTROL</span><h3>已封禁节点</h3></div><span class="panel-count">{{ virtualNetworkStatus.bannedNodes.length }}</span></div>
+              <div class="vn-token-grid">
+                <article v-for="ban in virtualNetworkStatus.bannedNodes" :key="ban.id" class="vn-token-card">
+                  <div><span class="code-pill">{{ ban.virtualAddress }}</span><button class="button button-small button-secondary" type="button" :disabled="dialogBusy" @click="unbanVirtualNetworkNode(detailsNetwork.id, ban.virtualAddress)">解封</button></div>
+                  <small>{{ ban.nodeName || '未知节点' }}</small>
+                  <small>{{ ban.reason }}</small>
+                </article>
+              </div>
+            </section>
+
+            <section class="vn-detail-section">
+              <div class="vn-section-heading"><div><span class="section-kicker">ACCESS CREDENTIALS</span><h3>节点 Token</h3></div><span class="panel-count">{{ virtualNetworkStatus?.tokens?.length ?? 0 }}</span></div>
+              <div class="vn-token-grid">
+                <article v-for="token in virtualNetworkStatus?.tokens || []" :key="token.id" class="vn-token-card">
+                  <div><span class="code-pill">{{ token.tokenPreview }}</span><span class="tag" :class="token.isConsumed ? 'tag-red' : 'tag-green'">{{ token.isConsumed ? '已消费' : token.tokenType }}</span></div>
+                  <small>{{ shortId(token.id) }}</small>
+                  <small>创建 {{ fmtDate(token.createdAt) }}</small>
+                  <small v-if="token.validUntil">到期 {{ fmtDate(token.validUntil) }}</small>
+                </article>
+                <div v-if="!(virtualNetworkStatus?.tokens || []).length" class="vn-empty-note">尚未创建 Token</div>
+              </div>
+            </section>
+
+            <section class="vn-detail-section">
+              <div class="vn-section-heading"><div><span class="section-kicker">CONNECTION HISTORY</span><h3>最近连接历史</h3></div><span class="panel-count">{{ virtualNetworkStatus?.recentSessions?.length ?? 0 }}</span></div>
+              <div class="table-wrap vn-history-wrap">
+                <table class="data-table vn-history-table">
+                  <thead><tr><th>节点</th><th>虚拟 IP</th><th>系统</th><th>Token</th><th>上线</th><th>最后心跳</th><th>状态</th></tr></thead>
+                  <tbody>
+                    <tr v-for="session in virtualNetworkStatus?.recentSessions || []" :key="session.id">
+                      <td data-label="节点"><strong>{{ session.nodeName || session.machineName || '未知节点' }}</strong><small class="block-subtext">{{ session.machineName }}</small></td>
+                      <td data-label="虚拟 IP"><span class="code-pill">{{ session.virtualAddress }}</span></td>
+                      <td data-label="系统"><div class="vn-device-stack"><strong>{{ session.osArchitecture }}</strong><small>{{ session.osDescription }}</small></div></td>
+                      <td data-label="Token">{{ session.tokenPreview || '未关联' }}</td>
+                      <td data-label="上线">{{ fmtDate(session.connectedAt) }}</td>
+                      <td data-label="最后心跳">{{ fmtDate(session.lastSeenAt) }}</td>
+                      <td data-label="状态"><span class="status-chip" :class="session.disconnectedAt ? 'status-chip-muted' : 'status-chip-live'"><span class="signal-dot"></span>{{ session.disconnectedAt ? '已离线' : '在线' }}</span></td>
+                    </tr>
+                    <tr v-if="!(virtualNetworkStatus?.recentSessions || []).length" class="vn-empty-row"><td colspan="7" class="empty-cell"><span class="empty-inline"><svg class="icon"><use href="#icon-activity"></use></svg>暂无连接历史</span></td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          </div>
+
+          <div v-else-if="activeDialog === 'confirm'" class="dialog-form">
+            <div class="danger-callout"><svg class="icon"><use href="#icon-alert"></use></svg><span>{{ confirmDialog.message }}</span></div>
+            <label v-if="confirmDialog.requireText" class="field"><span>输入 <code>{{ confirmDialog.requireText }}</code> 继续</span><input v-model.trim="confirmDialog.input" autocomplete="off" autofocus></label>
+            <div class="dialog-actions"><button class="button button-secondary" type="button" @click="closeDialog">取消</button><button class="button button-danger" type="button" :disabled="confirmDisabled" @click="confirmDestructive">{{ dialogBusy ? '处理中…' : confirmDialog.confirmLabel }}</button></div>
+          </div>
+        </section>
+      </div>
+    </transition>
+  </div>
   <script defer src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
   <script defer src="/app.js"></script>
 </body>

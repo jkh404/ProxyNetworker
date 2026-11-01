@@ -16,6 +16,7 @@ public sealed class RemotePortTunnelRelay : IDisposable
     private static readonly TimeSpan UdpSessionIdleTimeout = TimeSpan.FromMinutes(2);
 
     private readonly PortTunnelDefinitionRecord _definition;
+    private readonly IPAddress _publicListenAddress;
     private readonly ILogger<RemotePortTunnelRelay> _logger;
     private readonly TrafficLimiter _trafficLimiter;
     private readonly SemaphoreSlim _sendLock = new(1, 1);
@@ -31,9 +32,10 @@ public sealed class RemotePortTunnelRelay : IDisposable
     private long _nextConnectionId;
     private int _disposed;
 
-    public RemotePortTunnelRelay(PortTunnelDefinitionRecord definition, ILogger<RemotePortTunnelRelay> logger)
+    public RemotePortTunnelRelay(PortTunnelDefinitionRecord definition, IPAddress publicListenAddress, ILogger<RemotePortTunnelRelay> logger)
     {
         _definition = definition;
+        _publicListenAddress = publicListenAddress;
         _logger = logger;
         _trafficLimiter = new TrafficLimiter(definition.BandwidthLimitBytes, definition.MaxTrafficSpeedBytesPerSecond);
     }
@@ -52,9 +54,10 @@ public sealed class RemotePortTunnelRelay : IDisposable
         StartPublicEndpoint(runtimeToken);
         await SendReadyAsync(runtimeToken).ConfigureAwait(false);
         _logger.LogInformation(
-            "Remote port tunnel {TunnelName} connected. protocol={Protocol}, public=0.0.0.0:{PublicPort}, private={PrivateHost}:{PrivatePort}.",
+            "Remote port tunnel {TunnelName} connected. protocol={Protocol}, public={PublicListenAddress}:{PublicPort}, private={PrivateHost}:{PrivatePort}.",
             _definition.Name,
             _definition.Protocol,
+            _publicListenAddress,
             _definition.PublicPort,
             _definition.PrivateHost,
             _definition.PrivatePort);
@@ -69,7 +72,7 @@ public sealed class RemotePortTunnelRelay : IDisposable
             _definition.Name,
             "remote-port-tunnel",
             _definition.Protocol,
-            $"0.0.0.0:{_definition.PublicPort}",
+            $"{_publicListenAddress}:{_definition.PublicPort}",
             $"{_definition.PrivateHost}:{_definition.PrivatePort}",
             _startedAt,
             _webSocket?.State == WebSocketState.Open ? "connected" : "stopping");
@@ -108,7 +111,7 @@ public sealed class RemotePortTunnelRelay : IDisposable
     {
         if (string.Equals(_definition.Protocol, "tcp", StringComparison.OrdinalIgnoreCase))
         {
-            _tcpListener = new TcpListener(IPAddress.Any, _definition.PublicPort);
+            _tcpListener = new TcpListener(_publicListenAddress, _definition.PublicPort);
             _tcpListener.Start();
             _publicLoop = Task.Run(() => AcceptTcpLoopAsync(cancellationToken), CancellationToken.None);
             return;
@@ -116,7 +119,7 @@ public sealed class RemotePortTunnelRelay : IDisposable
 
         if (string.Equals(_definition.Protocol, "udp", StringComparison.OrdinalIgnoreCase))
         {
-            _udpSocket = new UdpClient(new IPEndPoint(IPAddress.Any, _definition.PublicPort));
+            _udpSocket = new UdpClient(new IPEndPoint(_publicListenAddress, _definition.PublicPort));
             _publicLoop = Task.Run(() => ReceiveUdpPublicLoopAsync(cancellationToken), CancellationToken.None);
             return;
         }

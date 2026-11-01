@@ -87,15 +87,16 @@ try
     builder.Services.AddSingleton<IValidateOptions<NetworkDefaultsOptions>, NetworkDefaultsOptionsValidator>();
     builder.Services.AddHostedService<DatabaseInitializer>();
     builder.Services.AddSingleton<PasswordHasher>();
+    builder.Services.AddSingleton<InitialAdminPasswordGenerator>();
     builder.Services.AddSingleton<TokenGenerator>();
     builder.Services.AddSingleton<AccessTokenSecretProtector>();
-    builder.Services.AddSingleton<TunnelRegistry>();
     builder.Services.AddSingleton<PortTunnelAccessService>();
     builder.Services.AddSingleton<RemotePortTunnelRegistry>();
     builder.Services.AddSingleton<VirtualNetworkAccessService>();
     builder.Services.AddSingleton<VirtualNetworkRuntimeRegistry>();
 
     var app = builder.Build();
+    app.Services.GetRequiredService<VirtualNetworkRuntimeRegistry>();
     app.Logger.LogInformation("ProxyNetworker data root: {DataRoot}", serverDataRoot);
     app.Logger.LogInformation("ProxyNetworker SQLite database: {DataSource}", GetSqliteDataSource(proxyNetworkerConnectionString));
 
@@ -117,22 +118,16 @@ try
     app.MapManagementApi();
     app.MapClientTunnelApi();
 
-    var tunnels = app.MapGroup("/api/tunnels").RequireAuthorization("AdminOnly");
+    var runtimeTunnels = app.MapGroup("/api/runtime-tunnels").RequireAuthorization("AdminOnly");
 
-    tunnels.MapGet("/", async (
-        TunnelRegistry registry,
+    runtimeTunnels.MapGet("/", (
         RemotePortTunnelRegistry remoteRegistry,
-        VirtualNetworkRuntimeRegistry virtualNetworkRegistry,
-        CancellationToken cancellationToken) =>
+        VirtualNetworkRuntimeRegistry virtualNetworkRegistry) =>
     {
-        var local = await registry.ListAsync(cancellationToken);
         var remote = remoteRegistry.List();
         var virtualNetworks = virtualNetworkRegistry.List();
-        return TypedResults.Ok(local.Concat(remote).Concat(virtualNetworks).OrderBy(item => item.StartedAt).ToArray());
+        return TypedResults.Ok(remote.Concat(virtualNetworks).OrderBy(item => item.StartedAt).ToArray());
     });
-    tunnels.MapPost("/port", StartPortTunnel);
-    tunnels.MapPost("/virtual-network", StartVirtualNetwork);
-    tunnels.MapDelete("/{id}", StopTunnel);
 
     await app.RunAsync();
 }
@@ -175,45 +170,6 @@ static void ConfigureSerilog(
             shared: true)
         .ReadFrom.Configuration(configuration)
         .ReadFrom.Services(services);
-}
-
-static async Task<IResult> StartPortTunnel(
-    CreatePortTunnelRequest request,
-    TunnelRegistry registry,
-    CancellationToken cancellationToken)
-{
-    try
-    {
-        var tunnel = await registry.StartPortTunnelAsync(request, cancellationToken);
-        return TypedResults.Created($"/api/tunnels/{tunnel.Id}", tunnel);
-    }
-    catch (Exception ex) when (ex is ArgumentException or ArgumentOutOfRangeException or InvalidOperationException)
-    {
-        return TypedResults.BadRequest(new ErrorResponse(ex.Message));
-    }
-}
-
-static async Task<IResult> StartVirtualNetwork(
-    CreateVirtualNetworkRequest request,
-    TunnelRegistry registry,
-    CancellationToken cancellationToken)
-{
-    try
-    {
-        var tunnel = await registry.StartVirtualNetworkAsync(request, cancellationToken);
-        return TypedResults.Created($"/api/tunnels/{tunnel.Id}", tunnel);
-    }
-    catch (Exception ex) when (ex is ArgumentException or ArgumentOutOfRangeException or InvalidOperationException or PlatformNotSupportedException)
-    {
-        return TypedResults.BadRequest(new ErrorResponse(ex.Message));
-    }
-}
-
-static async Task<IResult> StopTunnel(string id, TunnelRegistry registry, CancellationToken cancellationToken)
-{
-    return await registry.StopAsync(id, cancellationToken)
-        ? TypedResults.NoContent()
-        : TypedResults.NotFound(new ErrorResponse($"Tunnel '{id}' was not found."));
 }
 
 static string ResolveServerDataRoot(string contentRootPath)

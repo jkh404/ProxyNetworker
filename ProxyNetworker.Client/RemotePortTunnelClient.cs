@@ -125,7 +125,7 @@ internal sealed class RemotePortTunnelClient : IDisposable
             throw new InvalidDataException($"Expected Ready frame, got {frame.Type}.");
         }
 
-        _config = JsonSerializer.Deserialize<RemotePortTunnelConfig>(frame.GetTextPayload())
+        _config = JsonSerializer.Deserialize(frame.GetTextPayload(), ClientJsonContext.Default.RemotePortTunnelConfig)
             ?? throw new InvalidDataException("Server tunnel configuration is invalid.");
 
         Log(

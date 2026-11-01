@@ -88,6 +88,11 @@ public static class ClientTunnelApi
             return TypedResults.BadRequest(new ErrorResponse(ex.Message));
         }
 
+        if (!runtimeRegistry.TryGetAuthenticationKey(grant.Definition.Id, out var authenticationKey))
+        {
+            return TypedResults.Problem("Virtual Network authentication key is unavailable.");
+        }
+
         return TypedResults.Ok(new VirtualNetworkClientConfigResponse(
             grant.Definition.Id,
             grant.Definition.Name,
@@ -96,7 +101,9 @@ public static class ClientTunnelApi
             grant.Definition.GatewayAddress,
             grant.ClientAddress.ToString(),
             grant.Definition.PrefixLength,
-            grant.Definition.Mtu));
+            grant.Definition.Mtu,
+            ProxyNetworker.Core.VirtualNetworkTransportProtocols.Normalize(grant.Definition.TransportProtocol),
+            Convert.ToBase64String(authenticationKey)));
     }
 
     private static string ResolveServerHost(HttpRequest request)

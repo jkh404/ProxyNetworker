@@ -9,10 +9,6 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <None Remove="proxy-networker.db" />
-  </ItemGroup>
-
-  <ItemGroup>
     <ProjectReference Include="..\ProxyNetworker.Core\ProxyNetworker.Core.csproj" />
   </ItemGroup>
 
@@ -29,19 +25,9 @@
     <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.3" />
   </ItemGroup>
 
-  <ItemGroup>
-	  <None Include="proxy-networker.db">
-	    <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-	  </None>
-  </ItemGroup>
-
-  <ItemGroup>
-    <None Update="proxy-networker.db-shm">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Update="proxy-networker.db-wal">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-  </ItemGroup>
+  <Target Name="CopyMsQuicLinux" AfterTargets="Publish" Condition="'$(RuntimeIdentifier)' == 'linux-x64'">
+    <Copy SourceFiles="$(NuGetPackageRoot)stirlinglabs.msquic.bindings.runtime.linux-x64.openssl/2.2.2/runtimes/linux-x64/native/libmsquic-openssl.so"
+          DestinationFiles="$(PublishDir)libmsquic.so.2" />
+  </Target>
 
 </Project>

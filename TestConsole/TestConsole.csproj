@@ -17,4 +17,12 @@
     <ProjectReference Include="..\ProxyNetworker.Core\ProxyNetworker.Core.csproj" />
   </ItemGroup>
 
+  <ItemGroup Condition="'$(Platform)'=='x64' Or ('$(Platform)'!='x86' And '$(Platform)'!='arm' And '$(Platform)'!='arm64')">
+    <Content Include="..\ProxyNetworker.Core\Platforms\Windows\Wintun\DLL\win-x64\wintun.dll">
+      <Link>wintun.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+  </ItemGroup>
+
 </Project>

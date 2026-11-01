@@ -21,4 +21,6 @@ public sealed class PortTunnelDefinitionRecord
     public long MaxTrafficSpeedBytesPerSecond { get; set; }
 
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+
+    public long CreatedAtUnixMs { get; set; } = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 }

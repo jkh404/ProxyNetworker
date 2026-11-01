@@ -1,31 +1,50 @@
 using System.Diagnostics;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
-using Microsoft.Win32.SafeHandles;
 
 namespace ProxyNetworker.Core.Platforms.Linux;
 
 internal sealed partial class LinuxTunDevice : ITunDevice
 {
     private const int O_RDWR = 2;
+    private const int O_NONBLOCK = 0x800;
     private const short IFF_TUN = 0x0001;
     private const short IFF_NO_PI = 0x1000;
     private const ulong TUNSETIFF = 0x400454ca;
     private const int IFNAMSIZ = 16;
     private const int MaxPacketSize = 65535;
+    private const int PollTimeoutMilliseconds = 500;
+    private const short POLLIN = 0x0001;
+    private const short POLLOUT = 0x0004;
+    private const short POLLERR = 0x0008;
+    private const short POLLHUP = 0x0010;
+    private const short POLLNVAL = 0x0020;
+    private const int EINTR = 4;
+    private const int EAGAIN = 11;
 
     private readonly TunDeviceOptions _options;
     private readonly Action<ProxyNetworkerLogEntry>? _logger;
-    private FileStream? _stream;
+    private int _fileDescriptor = -1;
     private CancellationTokenSource? _readLoopCancellation;
     private Task? _readLoop;
     private int _started;
 
     public LinuxTunDevice(TunDeviceOptions options, Action<ProxyNetworkerLogEntry>? logger)
     {
-        _options = options;
         _logger = logger;
-        Name = options.Name;
+        var normalizedName = LinuxInterfaceName.Normalize(options.Name);
+        if (string.Equals(normalizedName, options.Name, StringComparison.Ordinal))
+        {
+            _options = options;
+        }
+        else
+        {
+            _options = CloneWithName(options, normalizedName);
+            Log(ProxyNetworkerLogLevel.Information,
+                $"Linux interface name '{options.Name}' exceeds the platform limit; using '{normalizedName}'.");
+        }
+
+        Name = _options.Name;
     }
 
     public string Name { get; private set; }
@@ -50,11 +69,11 @@ internal sealed partial class LinuxTunDevice : ITunDevice
             return;
         }
 
-        var fd = open("/dev/net/tun", O_RDWR);
+        var fd = open("/dev/net/tun", O_RDWR | O_NONBLOCK);
         if (fd < 0)
         {
             Interlocked.Exchange(ref _started, 0);
-            throw new InvalidOperationException($"Failed to open /dev/net/tun. errno={Marshal.GetLastWin32Error()}.");
+            throw new InvalidOperationException($"Failed to open /dev/net/tun. errno={Marshal.GetLastPInvokeError()}.");
         }
 
         try
@@ -63,13 +82,12 @@ internal sealed partial class LinuxTunDevice : ITunDevice
 
             if (ioctl(fd, TUNSETIFF, ref ifr) < 0)
             {
-                throw new InvalidOperationException($"Failed to create Linux TUN device '{_options.Name}'. errno={Marshal.GetLastWin32Error()}.");
+                throw new InvalidOperationException($"Failed to create Linux TUN device '{_options.Name}'. errno={Marshal.GetLastPInvokeError()}.");
             }
 
             Name = ifr.GetName();
-            var handle = new SafeFileHandle(new IntPtr(fd), ownsHandle: true);
+            _fileDescriptor = fd;
             fd = -1;
-            _stream = new FileStream(handle, FileAccess.ReadWrite, MaxPacketSize, isAsync: true);
 
             if (_options.ConfigureInterface)
             {
@@ -77,15 +95,18 @@ internal sealed partial class LinuxTunDevice : ITunDevice
             }
 
             _readLoopCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            _readLoop = Task.Run(() => ReadLoopAsync(_readLoopCancellation.Token));
+            _readLoop = Task.Run(() => ReadLoop(_readLoopCancellation.Token));
 
             Log(ProxyNetworkerLogLevel.Information, $"Started Linux TUN device '{Name}' with {_options.Address}/{_options.PrefixLength}.");
         }
         catch
         {
             Interlocked.Exchange(ref _started, 0);
-            _stream?.Dispose();
-            _stream = null;
+            var currentFd = Interlocked.Exchange(ref _fileDescriptor, -1);
+            if (currentFd >= 0)
+            {
+                close(currentFd);
+            }
 
             if (fd >= 0)
             {
@@ -96,7 +117,7 @@ internal sealed partial class LinuxTunDevice : ITunDevice
         }
     }
 
-    public async ValueTask SendAsync(ReadOnlyMemory<byte> packet, CancellationToken cancellationToken = default)
+    public ValueTask SendAsync(ReadOnlyMemory<byte> packet, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
@@ -105,9 +126,46 @@ internal sealed partial class LinuxTunDevice : ITunDevice
             throw new ArgumentException("Packet cannot be empty.", nameof(packet));
         }
 
-        var stream = _stream ?? throw new InvalidOperationException("The Linux TUN device has not been started.");
+        var fd = Volatile.Read(ref _fileDescriptor);
+        if (fd < 0)
+        {
+            throw new InvalidOperationException("The Linux TUN device has not been started.");
+        }
+
         var buffer = packet.ToArray();
-        await stream.WriteAsync(buffer, 0, buffer.Length, cancellationToken).ConfigureAwait(false);
+        var offset = 0;
+        while (offset < buffer.Length)
+        {
+            if (!WaitForEvent(fd, POLLOUT, cancellationToken))
+            {
+                return ValueTask.CompletedTask;
+            }
+
+            nint written;
+            unsafe
+            {
+                fixed (byte* pointer = buffer)
+                {
+                    written = write(fd, pointer + offset, (nuint)(buffer.Length - offset));
+                }
+            }
+
+            if (written > 0)
+            {
+                offset += checked((int)written);
+                continue;
+            }
+
+            var error = Marshal.GetLastPInvokeError();
+            if (written < 0 && error is EINTR or EAGAIN)
+            {
+                continue;
+            }
+
+            throw new IOException($"Failed to write to Linux TUN device '{Name}'. errno={error}.");
+        }
+
+        return ValueTask.CompletedTask;
     }
 
     public void Dispose()
@@ -118,7 +176,11 @@ internal sealed partial class LinuxTunDevice : ITunDevice
         }
 
         _readLoopCancellation?.Cancel();
-        _stream?.Dispose();
+        var fd = Interlocked.Exchange(ref _fileDescriptor, -1);
+        if (fd >= 0)
+        {
+            close(fd);
+        }
 
         try
         {
@@ -130,10 +192,9 @@ internal sealed partial class LinuxTunDevice : ITunDevice
 
         _readLoopCancellation?.Dispose();
         _readLoopCancellation = null;
-        _stream = null;
     }
 
-    private async Task ReadLoopAsync(CancellationToken cancellationToken)
+    private void ReadLoop(CancellationToken cancellationToken)
     {
         var buffer = new byte[MaxPacketSize];
 
@@ -141,36 +202,94 @@ internal sealed partial class LinuxTunDevice : ITunDevice
         {
             try
             {
-                var stream = _stream;
-                if (stream is null)
+                var fd = Volatile.Read(ref _fileDescriptor);
+                if (fd < 0 || !WaitForEvent(fd, POLLIN, cancellationToken))
                 {
                     return;
                 }
 
-                var length = await stream.ReadAsync(buffer, 0, buffer.Length, cancellationToken).ConfigureAwait(false);
-                if (length <= 0)
+                nint length;
+                unsafe
+                {
+                    fixed (byte* pointer = buffer)
+                    {
+                        length = read(fd, pointer, (nuint)buffer.Length);
+                    }
+                }
+
+                if (length > 0)
+                {
+                    var packet = new byte[(int)length];
+                    Buffer.BlockCopy(buffer, 0, packet, 0, packet.Length);
+                    PacketReceived?.Invoke(this, new TunPacketReceivedEventArgs(packet));
+                    continue;
+                }
+
+                if (length == 0)
                 {
                     continue;
                 }
 
-                var packet = new byte[length];
-                Buffer.BlockCopy(buffer, 0, packet, 0, length);
-                PacketReceived?.Invoke(this, new TunPacketReceivedEventArgs(packet));
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                return;
-            }
-            catch (ObjectDisposedException) when (cancellationToken.IsCancellationRequested)
-            {
-                return;
+                var error = Marshal.GetLastPInvokeError();
+                if (error is EINTR or EAGAIN)
+                {
+                    continue;
+                }
+
+                throw new IOException($"Failed to read from Linux TUN device '{Name}'. errno={error}.");
             }
             catch (Exception ex)
             {
-                Log(ProxyNetworkerLogLevel.Error, "Linux TUN read loop failed.", ex);
+                if (!cancellationToken.IsCancellationRequested)
+                {
+                    Log(ProxyNetworkerLogLevel.Error, "Linux TUN read loop failed.", ex);
+                }
+
                 return;
             }
         }
+    }
+
+    private static bool WaitForEvent(int fd, short events, CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            var pollFd = new PollFileDescriptor
+            {
+                FileDescriptor = fd,
+                Events = events
+            };
+            var result = poll(ref pollFd, 1, PollTimeoutMilliseconds);
+            if (result > 0)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    return false;
+                }
+
+                if ((pollFd.ReturnedEvents & (POLLERR | POLLHUP | POLLNVAL)) != 0)
+                {
+                    throw new IOException($"Poll failed for Linux TUN fd {fd}. revents={pollFd.ReturnedEvents}.");
+                }
+
+                return (pollFd.ReturnedEvents & events) != 0;
+            }
+
+            if (result == 0)
+            {
+                continue;
+            }
+
+            var error = Marshal.GetLastPInvokeError();
+            if (error == EINTR)
+            {
+                continue;
+            }
+
+            throw new IOException($"Poll failed for Linux TUN fd {fd}. errno={error}.");
+        }
+
+        return false;
     }
 
     private async Task ConfigureInterfaceAsync(CancellationToken cancellationToken)
@@ -181,15 +300,33 @@ internal sealed partial class LinuxTunDevice : ITunDevice
 
     private static void ValidateLinuxInterfaceName(string name)
     {
-        if (name.Length >= IFNAMSIZ)
+        var byteCount = System.Text.Encoding.UTF8.GetByteCount(name);
+        if (byteCount >= IFNAMSIZ)
         {
-            throw new ArgumentException($"Linux interface names must be shorter than {IFNAMSIZ} bytes.", nameof(name));
+            throw new ArgumentException(
+                $"Linux interface name '{name}' is {byteCount} bytes; the maximum is {IFNAMSIZ - 1} bytes.",
+                nameof(name));
         }
 
         if (name.Any(static c => !(char.IsLetterOrDigit(c) || c is '_' or '-' or '.')))
         {
             throw new ArgumentException("Linux interface names can only contain letters, digits, '_', '-' and '.'.", nameof(name));
         }
+    }
+
+    private static TunDeviceOptions CloneWithName(TunDeviceOptions options, string name)
+    {
+        return new TunDeviceOptions
+        {
+            Name = name,
+            TunnelType = options.TunnelType,
+            Address = options.Address,
+            PrefixLength = options.PrefixLength,
+            Mtu = options.Mtu,
+            WindowsAdapterId = options.WindowsAdapterId,
+            WindowsSessionCapacity = options.WindowsSessionCapacity,
+            ConfigureInterface = options.ConfigureInterface
+        };
     }
 
     private async Task RunCommandAsync(string fileName, string arguments, CancellationToken cancellationToken)
@@ -274,11 +411,28 @@ internal sealed partial class LinuxTunDevice : ITunDevice
         }
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct PollFileDescriptor
+    {
+        public int FileDescriptor;
+        public short Events;
+        public short ReturnedEvents;
+    }
+
     [LibraryImport("libc", EntryPoint = "open", StringMarshalling = StringMarshalling.Utf8, SetLastError = true)]
     private static partial int open(string pathname, int flags);
 
     [LibraryImport("libc", EntryPoint = "ioctl", SetLastError = true)]
     private static partial int ioctl(int fd, ulong request, ref IfReq ifr);
+
+    [LibraryImport("libc", EntryPoint = "poll", SetLastError = true)]
+    private static partial int poll(ref PollFileDescriptor fds, nuint count, int timeout);
+
+    [LibraryImport("libc", EntryPoint = "read", SetLastError = true)]
+    private static unsafe partial nint read(int fd, byte* buffer, nuint count);
+
+    [LibraryImport("libc", EntryPoint = "write", SetLastError = true)]
+    private static unsafe partial nint write(int fd, byte* buffer, nuint count);
 
     [LibraryImport("libc", EntryPoint = "close", SetLastError = true)]
     private static partial int close(int fd);

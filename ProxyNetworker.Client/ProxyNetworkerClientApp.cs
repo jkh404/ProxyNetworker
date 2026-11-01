@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Sockets;
 using ProxyNetworker.Core;
+using ProxyNetworker.Core.Platforms.Linux;
 using ProxyNetworker.Core.PortTunnels;
 using Serilog;
 using Serilog.Events;
@@ -107,12 +108,13 @@ internal static class ProxyNetworkerClientApp
             return await CreateVirtualNetworkAndTokenAsync(commandLine).ConfigureAwait(false);
         }
 
-        if (commandLine.HasOption("token") || commandLine.SubCommandIs("connect-token"))
+        var token = commandLine.Option("token", "PN_TOKEN");
+        if (!string.IsNullOrWhiteSpace(token) || commandLine.SubCommandIs("connect-token"))
         {
             var server = RequiredValue(commandLine.Option("server", "PN_SERVER"), "--server");
-            var token = commandLine.Option("token", "PN_TOKEN") ?? commandLine.Argument(2);
+            token ??= commandLine.Argument(2);
             token = RequiredValue(token, "--token").Trim();
-            return await RunVirtualNetworkTokenAsync(server, token, commandLine.Option("name")).ConfigureAwait(false);
+            return await RunVirtualNetworkTokenAsync(server, token, commandLine.Option("name"), IsRelayOnly(commandLine)).ConfigureAwait(false);
         }
 
         return await RunVirtualNetworkDirectAsync(commandLine, serverArgumentIndex: 1).ConfigureAwait(false);
@@ -194,6 +196,8 @@ internal static class ProxyNetworkerClientApp
         var prefixLength = commandLine.IntOption("prefix", 24);
         var listenPort = commandLine.IntOption("listen-port", 0);
         var mtu = commandLine.IntOption("mtu", 1400);
+        var transportProtocol = VirtualNetworkTransportProtocols.Normalize(
+            commandLine.Option("transport") ?? Environment.GetEnvironmentVariable("PN_TRANSPORT") ?? VirtualNetworkTransportProtocols.Udp);
         var tokenType = commandLine.Option("token-type") ?? "Permanent";
         var validFrom = ParseOptionalDateTimeOffset(commandLine.Option("valid-from"), "--valid-from");
         var validUntil = ParseOptionalDateTimeOffset(commandLine.Option("valid-until"), "--valid-until");
@@ -207,6 +211,7 @@ internal static class ProxyNetworkerClientApp
             prefixLength,
             listenPort,
             mtu,
+            transportProtocol,
             shutdown.Token).ConfigureAwait(false);
         var token = await api.CreateVirtualNetworkTokenAsync(
             definition.Id,
@@ -218,7 +223,8 @@ internal static class ProxyNetworkerClientApp
         Console.WriteLine($"Signed in as {account.Username} ({account.Role}).");
         Console.WriteLine($"Virtual Network created: {definition.Name}");
         Console.WriteLine($"  gateway: {definition.GatewayAddress}/{definition.PrefixLength}");
-        Console.WriteLine($"  udp:     {definition.ListenPort}");
+        Console.WriteLine($"  protocol:{definition.TransportProtocol}");
+        Console.WriteLine($"  port:    {definition.ListenPort}");
         Console.WriteLine($"  mtu:     {definition.Mtu}");
         Console.WriteLine($"  token:   {token.PlainTextToken}");
 
@@ -228,7 +234,7 @@ internal static class ProxyNetworkerClientApp
         }
 
         Console.WriteLine("Starting Virtual Network client with the created token.");
-        return await RunVirtualNetworkTokenAsync(server, token.PlainTextToken, commandLine.Option("client-name")).ConfigureAwait(false);
+        return await RunVirtualNetworkTokenAsync(server, token.PlainTextToken, commandLine.Option("client-name"), IsRelayOnly(commandLine)).ConfigureAwait(false);
     }
 
     private static async Task<int> RunTokenConnectAsync(CommandLine commandLine, int tokenArgumentIndex)
@@ -244,7 +250,7 @@ internal static class ProxyNetworkerClientApp
 
         if (token.StartsWith("vnet_", StringComparison.OrdinalIgnoreCase))
         {
-            return await RunVirtualNetworkTokenAsync(server, token, commandLine.Option("name")).ConfigureAwait(false);
+            return await RunVirtualNetworkTokenAsync(server, token, commandLine.Option("name"), IsRelayOnly(commandLine)).ConfigureAwait(false);
         }
 
         Console.Error.WriteLine("Unknown token prefix. Expected ptun_ for port tunnels or vnet_ for virtual networks.");
@@ -264,10 +270,10 @@ internal static class ProxyNetworkerClientApp
         return 0;
     }
 
-    private static async Task<int> RunVirtualNetworkTokenAsync(string server, string token, string? name)
+    private static async Task<int> RunVirtualNetworkTokenAsync(string server, string token, string? name, bool relayOnly)
     {
         using var shutdown = CreateShutdownSource();
-        using var runtime = await StartVirtualNetworkTokenAsync(server, token, name, shutdown.Token).ConfigureAwait(false);
+        using var runtime = await StartVirtualNetworkTokenAsync(server, token, name, relayOnly, shutdown.Token).ConfigureAwait(false);
         Console.WriteLine("Press Ctrl+C to stop.");
 
         await WaitUntilCancelledAsync(shutdown.Token).ConfigureAwait(false);
@@ -317,12 +323,16 @@ internal static class ProxyNetworkerClientApp
         var config = new DirectVirtualNetworkClientConfig
         {
             Name = commandLine.Option("name") ?? "pn-client",
+            NodeDisplayName = commandLine.Option("name") ?? "pn-client",
             ServerHost = serverHost,
             ServerPort = commandLine.IntOption("port", commandLine.Argument(serverArgumentIndex + 1), 51820),
             BindPort = commandLine.IntOption("bind-port", 0),
             TunAddress = commandLine.Option("tun-address") ?? "10.66.0.2",
             PrefixLength = commandLine.IntOption("prefix", 24),
-            Mtu = commandLine.IntOption("mtu", 1400)
+            Mtu = commandLine.IntOption("mtu", 1400),
+            TransportProtocol = VirtualNetworkTransportProtocols.Normalize(commandLine.Option("transport") ?? Environment.GetEnvironmentVariable("PN_TRANSPORT")),
+            AuthenticationKey = ParseAuthenticationKey(commandLine.Option("auth-key", "PN_AUTH_KEY")),
+            RelayOnly = IsRelayOnly(commandLine)
         };
 
         using var shutdown = CreateShutdownSource();
@@ -401,7 +411,7 @@ internal static class ProxyNetworkerClientApp
                         else
                         {
                             Console.WriteLine($"Starting Virtual Network '{virtualNetwork.Name}' by token from {server}.");
-                            disposables.Add(await StartVirtualNetworkTokenAsync(server, virtualNetwork.Token, virtualNetwork.Name, shutdown.Token).ConfigureAwait(false));
+                            disposables.Add(await StartVirtualNetworkTokenAsync(server, virtualNetwork.Token, virtualNetwork.Name, virtualNetwork.RelayOnly, shutdown.Token).ConfigureAwait(false));
                             tasks.Add(WaitUntilCancelledAsync(shutdown.Token));
                         }
                     }
@@ -491,19 +501,28 @@ internal static class ProxyNetworkerClientApp
 
         try
         {
-            var tunnel = new VirtualNetworkTunnel(
-                tunDevice,
-                new VirtualNetworkTunnelOptions
-                {
-                    BindEndPoint = new IPEndPoint(IPAddress.Any, config.BindPort),
-                    RemoteEndPoint = remoteEndPoint,
-                    NodeAddress = tunAddress,
-                    PrefixLength = config.PrefixLength,
-                    NodeName = config.Name
-                },
-                WriteLog);
+            var options = new VirtualNetworkTunnelOptions
+            {
+                BindEndPoint = new IPEndPoint(IPAddress.Any, config.BindPort),
+                RemoteEndPoint = remoteEndPoint,
+                NodeAddress = tunAddress,
+                PrefixLength = config.PrefixLength,
+                NodeName = string.IsNullOrWhiteSpace(config.NodeDisplayName) ? config.Name : config.NodeDisplayName,
+                AuthenticationKey = config.AuthenticationKey,
+                EnableDirectPaths = !config.RelayOnly
+            };
+            IDisposable tunnel = VirtualNetworkTransportProtocols.UsesReliableStream(config.TransportProtocol)
+                ? new VirtualNetworkStreamTunnel(tunDevice, options, config.TransportProtocol, WriteLog)
+                : new VirtualNetworkTunnel(tunDevice, options, WriteLog);
 
-            await tunnel.StartAsync(cancellationToken).ConfigureAwait(false);
+            if (tunnel is VirtualNetworkStreamTunnel streamTunnel)
+            {
+                await streamTunnel.StartAsync(cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                await ((VirtualNetworkTunnel)tunnel).StartAsync(cancellationToken).ConfigureAwait(false);
+            }
             Console.WriteLine($"ProxyNetworker Virtual Network client started. TUN={config.Name} {tunAddress}/{config.PrefixLength}, peer={remoteEndPoint}.");
             return tunnel;
         }
@@ -518,32 +537,101 @@ internal static class ProxyNetworkerClientApp
         string server,
         string token,
         string? name,
+        bool relayOnly,
         CancellationToken cancellationToken)
     {
         using var api = new ManagementApiClient(server);
         var remoteConfig = await api.GetVirtualNetworkConfigAsync(token, cancellationToken).ConfigureAwait(false);
-        var nodeName = string.IsNullOrWhiteSpace(name)
+        var displayName = string.IsNullOrWhiteSpace(name)
             ? CreateClientTunName(remoteConfig.NetworkId)
             : name;
-        var serverHost = NormalizeHost(remoteConfig.ServerHost, server);
+        var nodeName = displayName;
+        if (OperatingSystem.IsLinux())
+        {
+            var normalizedName = LinuxInterfaceName.Normalize(nodeName);
+            if (!string.Equals(normalizedName, nodeName, StringComparison.Ordinal))
+            {
+                Console.WriteLine($"Linux interface name '{nodeName}' is too long; using '{normalizedName}'.");
+                nodeName = normalizedName;
+            }
+        }
 
-        Console.WriteLine($"Virtual Network token accepted. network={remoteConfig.Name}, assigned={remoteConfig.ClientAddress}/{remoteConfig.PrefixLength}, server={serverHost}:{remoteConfig.ServerPort}.");
+        var serverHost = NormalizeHost(remoteConfig.ServerHost, server);
+        byte[] authenticationKey;
+        try
+        {
+            authenticationKey = Convert.FromBase64String(remoteConfig.AuthenticationKey);
+        }
+        catch (FormatException)
+        {
+            throw new InvalidOperationException("Virtual Network server returned an invalid authentication key.");
+        }
+
+        if (authenticationKey.Length != 32)
+        {
+            throw new InvalidOperationException("Virtual Network server returned an invalid authentication key length.");
+        }
+
+        Console.WriteLine($"Virtual Network token accepted. network={remoteConfig.Name}, transport={remoteConfig.TransportProtocol}, assigned={remoteConfig.ClientAddress}/{remoteConfig.PrefixLength}, server={serverHost}:{remoteConfig.ServerPort}.");
 
         return await StartVirtualNetworkDirectAsync(new DirectVirtualNetworkClientConfig
         {
             Name = nodeName,
+            NodeDisplayName = displayName,
             ServerHost = serverHost,
             ServerPort = remoteConfig.ServerPort,
             BindPort = 0,
             TunAddress = remoteConfig.ClientAddress,
             PrefixLength = remoteConfig.PrefixLength,
-            Mtu = remoteConfig.Mtu
+            Mtu = remoteConfig.Mtu,
+            AuthenticationKey = authenticationKey,
+            TransportProtocol = remoteConfig.TransportProtocol,
+            RelayOnly = relayOnly
         }, cancellationToken).ConfigureAwait(false);
     }
 
     private static string CreateClientTunName(string networkId)
     {
         return $"pc{networkId[..Math.Min(10, networkId.Length)]}";
+    }
+
+    private static byte[] ParseAuthenticationKey(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            throw new InvalidOperationException(
+                "Direct Virtual Network mode requires --auth-key or PN_AUTH_KEY. Token mode obtains the key automatically.");
+        }
+
+        byte[] key;
+        try
+        {
+            key = Convert.FromBase64String(value);
+        }
+        catch (FormatException)
+        {
+            throw new InvalidOperationException("Virtual Network authentication key must be base64-encoded.");
+        }
+
+        if (key.Length != 32)
+        {
+            throw new InvalidOperationException("Virtual Network authentication key must decode to 32 bytes.");
+        }
+
+        return key;
+    }
+
+    private static bool IsRelayOnly(CommandLine commandLine)
+    {
+        if (commandLine.IsFlagEnabled("relay-only") || commandLine.IsFlagEnabled("no-direct"))
+        {
+            return true;
+        }
+
+        var value = Environment.GetEnvironmentVariable("PN_RELAY_ONLY");
+        return string.Equals(value, "1", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(value, "true", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(value, "yes", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string NormalizeHost(string host, string fallbackServer)
@@ -763,19 +851,20 @@ internal static class ProxyNetworkerClientApp
 
     private static void PrintUsage()
     {
+        var executableName = OperatingSystem.IsWindows() ? "ProxyNetworker.Client.exe" : "ProxyNetworker.Client";
         Console.WriteLine("ProxyNetworker.Client commands:");
-        Console.WriteLine("  ProxyNetworker.Client.exe");
+        Console.WriteLine($"  {executableName}");
         Console.WriteLine("    Runs appsettings.json or proxynetworker.client.json from the current directory.");
-        Console.WriteLine("  connect --server http://server:5000 --token ptun_xxx");
+        Console.WriteLine($"  {executableName} connect --server http://server:13301 --token ptun_xxx");
         Console.WriteLine("  run --config appsettings.json");
         Console.WriteLine("  run --config proxynetworker.client.json");
         Console.WriteLine("  init-config [--path appsettings.json|proxynetworker.client.json] [--force]");
-        Console.WriteLine("  port-tunnel create --server http://server:5000 --username sky --target 127.0.0.1:80 [--protocol tcp|udp] [--run]");
-        Console.WriteLine("  port-tunnel --protocol tcp|udp --listen 127.0.0.1:8080 --target 127.0.0.1:80 [--name web]");
-        Console.WriteLine("  virtual-network create --server http://server:5000 --username sky [--gateway 10.66.0.1] [--prefix 24] [--run]");
-        Console.WriteLine("  virtual-network --server http://server:5000 --token vnet_xxx [--name pn-client]");
-        Console.WriteLine("  virtual-network --server <host> [--port 51820] [--tun-address 10.66.0.2] [--prefix 24] [--name pn-client]");
-        Console.WriteLine("  auth change-password --server http://server:5000 --username sky [--password current] [--new-password next]");
+        Console.WriteLine($"  {executableName} port-tunnel create --server http://server:13301 --username sky --target 127.0.0.1:80 [--protocol tcp|udp] [--run]");
+        Console.WriteLine($"  {executableName} port-tunnel --protocol tcp|udp --listen 127.0.0.1:8080 --target 127.0.0.1:80 [--name web]");
+        Console.WriteLine($"  {executableName} virtual-network create --server http://server:13301 --username sky [--gateway 10.66.0.1] [--prefix 24] [--run]");
+        Console.WriteLine($"  {executableName} virtual-network --server http://server:13301 --token vnet_xxx [--name pn-client] [--relay-only]");
+        Console.WriteLine($"  {executableName} virtual-network --server <host> [--port 51820] [--tun-address 10.66.0.2] [--prefix 24] [--name pn-client]");
+        Console.WriteLine($"  {executableName} auth change-password --server http://server:13301 --username sky [--password current] [--new-password next]");
         Console.WriteLine();
         Console.WriteLine("Environment fallbacks: PN_SERVER, PN_TOKEN, PN_USERNAME, PN_PASSWORD.");
     }

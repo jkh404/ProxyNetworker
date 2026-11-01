@@ -11,6 +11,8 @@ public sealed class CreateVirtualNetworkDefinitionRequest
     public int ListenPort { get; set; }
 
     public int Mtu { get; set; }
+
+    public string TransportProtocol { get; set; } = ProxyNetworker.Core.VirtualNetworkTransportProtocols.Udp;
 }
 
 public sealed record VirtualNetworkDefinitionResponse(
@@ -21,7 +23,21 @@ public sealed record VirtualNetworkDefinitionResponse(
     int PrefixLength,
     int ListenPort,
     int Mtu,
+    string TransportProtocol,
+    bool IsEnabled,
     DateTimeOffset CreatedAt);
+
+public sealed class SetVirtualNetworkEnabledRequest
+{
+    public bool Enabled { get; set; }
+}
+
+public sealed class BanVirtualNetworkNodeRequest
+{
+    public string VirtualAddress { get; set; } = string.Empty;
+
+    public string Reason { get; set; } = string.Empty;
+}
 
 public sealed class CreatePortTunnelDefinitionRequest
 {
@@ -72,6 +88,54 @@ public sealed record CreatedAccessTokenResponse(
     string PlainTextToken);
 
 public sealed record AccessTokenValueResponse(string PlainTextToken);
+
+public sealed record VirtualNetworkOnlineNodeResponse(
+    string VirtualAddress,
+    string NodeName,
+    string MachineName,
+    string OsDescription,
+    string OsArchitecture,
+    string ProcessArchitecture,
+    string ClientVersion,
+    string PublicEndpoint,
+    string[] LocalEndpoints,
+    string TokenId,
+    string TokenPreview,
+    DateTimeOffset ConnectedAt,
+    DateTimeOffset LastSeenAt);
+
+public sealed record VirtualNetworkSessionResponse(
+    string Id,
+    string VirtualAddress,
+    string NodeName,
+    string MachineName,
+    string OsDescription,
+    string OsArchitecture,
+    string ProcessArchitecture,
+    string ClientVersion,
+    string PublicEndpoint,
+    string[] LocalEndpoints,
+    string TokenId,
+    string TokenPreview,
+    DateTimeOffset ConnectedAt,
+    DateTimeOffset LastSeenAt,
+    DateTimeOffset? DisconnectedAt);
+
+public sealed record VirtualNetworkStatusResponse(
+    bool IsEnabled,
+    int OnlineNodeCount,
+    VirtualNetworkOnlineNodeResponse[] OnlineNodes,
+    AccessTokenResponse[] Tokens,
+    VirtualNetworkSessionResponse[] RecentSessions,
+    VirtualNetworkNodeBanResponse[] BannedNodes);
+
+public sealed record VirtualNetworkNodeBanResponse(
+    string Id,
+    string VirtualAddress,
+    string TokenId,
+    string NodeName,
+    string Reason,
+    DateTimeOffset CreatedAt);
 
 public sealed class UpdateSystemSettingsRequest
 {
