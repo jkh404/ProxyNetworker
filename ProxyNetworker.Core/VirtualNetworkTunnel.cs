@@ -16,8 +16,10 @@ public sealed class VirtualNetworkTunnel : IDisposable
     private readonly Dictionary<string, PeerPathState> _directPeersByAddress = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, (IPAddress Origin, VirtualNetworkMeshAdvertisement Advertisement)> _meshAdvertisements = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _lastForwardingPaths = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, DateTimeOffset> _directPathCooldownByAddress = new(StringComparer.OrdinalIgnoreCase);
     private VirtualNetworkMeshRouteTable _meshRoutes = VirtualNetworkMeshRouteTable.Empty;
     private long _meshAdvertisementSequence;
+    private DateTimeOffset _globalDirectPathCooldownUntil;
     private UdpClient? _udpClient;
     private IPEndPoint? _remoteEndPoint;
     private CancellationTokenSource? _runtimeCancellation;
@@ -84,6 +86,7 @@ public sealed class VirtualNetworkTunnel : IDisposable
             if (!IsServer)
             {
                 await SendControlFrameAsync(VirtualNetworkFrameType.Hello, _options.RemoteEndPoint!, cancellationToken).ConfigureAwait(false);
+                await SendRelayRequiredAsync(!_options.EnableDirectPaths, cancellationToken).ConfigureAwait(false);
                 if (_options.EnableDirectPaths)
                 {
                     await SendLocalCandidatesAsync(cancellationToken).ConfigureAwait(false);
@@ -183,6 +186,14 @@ public sealed class VirtualNetworkTunnel : IDisposable
             catch (SocketException) when (cancellationToken.IsCancellationRequested)
             {
                 return;
+            }
+            catch (SocketException ex) when (ex.SocketErrorCode is SocketError.ConnectionReset or SocketError.ConnectionRefused)
+            {
+                // Windows reports ICMP port-unreachable from a failed direct-path probe
+                // as WSAECONNRESET on the shared UDP socket. It is a per-path signal,
+                // not a reason to stop receiving relay and direct traffic entirely.
+                SuspendDirectPaths(null, $"UDP socket error {ex.SocketErrorCode}");
+                continue;
             }
             catch (Exception ex)
             {
@@ -603,9 +614,19 @@ public sealed class VirtualNetworkTunnel : IDisposable
     private VirtualNetworkMeshLink[] GetLocalMeshLinksLocked()
     {
         var now = DateTimeOffset.UtcNow;
+        if (now < _globalDirectPathCooldownUntil)
+        {
+            return [];
+        }
+
         var links = new List<VirtualNetworkMeshLink>();
         foreach (var state in _directPeersByAddress.Values)
         {
+            if (IsDirectPathSuspendedLocked(state.VirtualAddress, now))
+            {
+                continue;
+            }
+
             var best = state.Paths.Values
                 .Where(path => !path.IsRelay && path.EwmaRttMs is not null && now - path.LastSuccess <= _options.PeerTimeout)
                 .OrderBy(static path => path.ScoreMilliseconds)
@@ -631,12 +652,68 @@ public sealed class VirtualNetworkTunnel : IDisposable
     private PathMeasurement? TryGetBestDirectPathLocked(IPAddress virtualAddress)
     {
         var now = DateTimeOffset.UtcNow;
+        if (IsDirectPathSuspendedLocked(virtualAddress, now))
+        {
+            return null;
+        }
+
         return _directPeersByAddress.TryGetValue(AddressKey(virtualAddress), out var state)
             ? state.Paths.Values
                 .Where(path => !path.IsRelay && path.EwmaRttMs is not null && now - path.LastSuccess <= _options.PeerTimeout)
                 .OrderBy(static path => path.ScoreMilliseconds)
                 .FirstOrDefault()
             : null;
+    }
+
+    private void SuspendDirectPaths(IPAddress? virtualAddress, string reason)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var until = now + _options.DirectPathFailureCooldown;
+        var changed = false;
+
+        lock (_peersLock)
+        {
+            if (virtualAddress is null)
+            {
+                if (until <= _globalDirectPathCooldownUntil)
+                {
+                    return;
+                }
+
+                _globalDirectPathCooldownUntil = until;
+                changed = true;
+            }
+            else
+            {
+                var key = AddressKey(virtualAddress);
+                if (_directPathCooldownByAddress.TryGetValue(key, out var existing) && until <= existing)
+                {
+                    return;
+                }
+
+                _directPathCooldownByAddress[key] = until;
+                changed = true;
+            }
+
+            if (changed)
+            {
+                _lastForwardingPaths.Clear();
+                RebuildMeshRoutesLocked();
+            }
+        }
+
+        if (changed)
+        {
+            var scope = virtualAddress is null ? "all peers" : virtualAddress.ToString();
+            Log(ProxyNetworkerLogLevel.Warning,
+                $"Virtual Network direct paths for {scope} suspended until {until:O}: {reason}");
+        }
+    }
+
+    private bool IsDirectPathSuspendedLocked(IPAddress virtualAddress, DateTimeOffset now)
+    {
+        return now < _globalDirectPathCooldownUntil ||
+            (_directPathCooldownByAddress.TryGetValue(AddressKey(virtualAddress), out var until) && now < until);
     }
 
     private PathMeasurement? TryGetBestRelayPathLocked(IPAddress virtualAddress)
@@ -691,8 +768,15 @@ public sealed class VirtualNetworkTunnel : IDisposable
             }
             catch (Exception ex) when (ex is SocketException or ObjectDisposedException)
             {
-                Log(ProxyNetworkerLogLevel.Debug,
-                    $"Virtual Network path probe to {probe.EndPoint} for {probe.VirtualAddress} failed: {ex.Message}");
+                if (ex is SocketException)
+                {
+                    SuspendDirectPaths(probe.VirtualAddress, ex.Message);
+                }
+                else
+                {
+                    Log(ProxyNetworkerLogLevel.Debug,
+                        $"Virtual Network path probe to {probe.EndPoint} for {probe.VirtualAddress} failed: {ex.Message}");
+                }
             }
         }
     }
@@ -700,32 +784,35 @@ public sealed class VirtualNetworkTunnel : IDisposable
     private IPEndPoint[] GetLocalCandidateEndPoints(int port)
     {
         var endpoints = new List<IPEndPoint>();
-        foreach (var networkInterface in NetworkInterface.GetAllNetworkInterfaces())
+        if (_options.IncludeLocalInterfaceCandidates)
         {
-            if (networkInterface.OperationalStatus != OperationalStatus.Up ||
-                networkInterface.NetworkInterfaceType is NetworkInterfaceType.Loopback or NetworkInterfaceType.Tunnel)
+            foreach (var networkInterface in NetworkInterface.GetAllNetworkInterfaces())
             {
-                continue;
-            }
-
-            foreach (var unicast in networkInterface.GetIPProperties().UnicastAddresses)
-            {
-                var address = unicast.Address;
-                if (address.AddressFamily != AddressFamily.InterNetwork ||
-                    IPAddress.IsLoopback(address) ||
-                    address.Equals(IPAddress.Any) ||
-                    IsInVirtualNetwork(address))
+                if (networkInterface.OperationalStatus != OperationalStatus.Up ||
+                    networkInterface.NetworkInterfaceType is NetworkInterfaceType.Loopback or NetworkInterfaceType.Tunnel)
                 {
                     continue;
                 }
 
-                var bytes = address.GetAddressBytes();
-                if (bytes[0] == 169 && bytes[1] == 254)
+                foreach (var unicast in networkInterface.GetIPProperties().UnicastAddresses)
                 {
-                    continue;
-                }
+                    var address = unicast.Address;
+                    if (address.AddressFamily != AddressFamily.InterNetwork ||
+                        IPAddress.IsLoopback(address) ||
+                        address.Equals(IPAddress.Any) ||
+                        IsInVirtualNetwork(address))
+                    {
+                        continue;
+                    }
 
-                endpoints.Add(new IPEndPoint(address, port));
+                    var bytes = address.GetAddressBytes();
+                    if (bytes[0] == 169 && bytes[1] == 254)
+                    {
+                        continue;
+                    }
+
+                    endpoints.Add(new IPEndPoint(address, port));
+                }
             }
         }
 
@@ -1018,6 +1105,22 @@ public sealed class VirtualNetworkTunnel : IDisposable
         await SendFrameAsync(frame, remoteEndPoint, cancellationToken).ConfigureAwait(false);
     }
 
+    private async Task SendRelayRequiredAsync(bool relayRequired, CancellationToken cancellationToken)
+    {
+        var remoteEndPoint = _options.RemoteEndPoint;
+        if (remoteEndPoint is null)
+        {
+            return;
+        }
+
+        var frame = VirtualNetworkFrame.Create(
+            VirtualNetworkFrameType.RelayRequired,
+            _options.NodeAddress,
+            [relayRequired ? (byte)1 : (byte)0],
+            _options.AuthenticationKey);
+        await SendFrameAsync(frame, remoteEndPoint, cancellationToken).ConfigureAwait(false);
+    }
+
     private async Task SendPacketFrameAsync(ReadOnlyMemory<byte> packet, IPEndPoint remoteEndPoint, CancellationToken cancellationToken)
     {
         var frame = VirtualNetworkFrame.Create(VirtualNetworkFrameType.Packet, _options.NodeAddress, packet.Span, _options.AuthenticationKey);
@@ -1114,6 +1217,19 @@ public sealed class VirtualNetworkTunnel : IDisposable
                 .ToArray())
             {
                 _meshAdvertisements.Remove(key);
+            }
+
+            if (_globalDirectPathCooldownUntil <= now)
+            {
+                _globalDirectPathCooldownUntil = default;
+            }
+
+            foreach (var key in _directPathCooldownByAddress
+                .Where(item => item.Value <= now)
+                .Select(static item => item.Key)
+                .ToArray())
+            {
+                _directPathCooldownByAddress.Remove(key);
             }
 
             RebuildMeshRoutesLocked();

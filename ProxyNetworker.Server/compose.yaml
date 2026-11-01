@@ -21,6 +21,8 @@ services:
       urls: http://127.0.0.1:13301
       ConnectionStrings__ProxyNetworker: Data Source=/data/proxynetworker.db
       NetworkDefaults__PublicListenAddress: 0.0.0.0
+      # Set this to the public hostname or IP used by clients for data ports.
+      NetworkDefaults__AdvertisedHost: ""
       SystemSettings__PublicPortRangeStart: "40000"
       SystemSettings__PublicPortRangeEnd: "42999"
       DOTNET_EnableDiagnostics: "0"

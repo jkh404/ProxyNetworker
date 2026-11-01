@@ -9,6 +9,41 @@ namespace ProxyNetworker.Core.Tests;
 public sealed class MeshUdpIntegrationTests
 {
     [Fact]
+    public async Task RelayRequiredPeerIsNotAdvertisedAsDirectCandidate()
+    {
+        var authenticationKey = RandomNumberGenerator.GetBytes(32);
+        var serverPort = GetFreeUdpPort();
+        var clientAPort = GetFreeUdpPort();
+        var clientBPort = GetFreeUdpPort();
+        var logs = new ConcurrentQueue<string>();
+
+        using var server = new VirtualNetworkRelay(
+            CreateOptions("10.66.0.1", serverPort, null, "mesh-test-server", authenticationKey, []),
+            entry => logs.Enqueue($"server: {entry.Message}"));
+        await server.StartAsync();
+
+        var tunA = new TestTunDevice();
+        var tunB = new TestTunDevice();
+        var optionsA = CreateOptions("10.66.0.2", clientAPort, serverPort, "client-a", authenticationKey, []);
+        optionsA.AdditionalCandidateEndPoints = [new IPEndPoint(IPAddress.Loopback, clientAPort)];
+        var optionsB = CreateOptions("10.66.0.4", clientBPort, serverPort, "client-b", authenticationKey, []);
+        optionsB.EnableDirectPaths = false;
+
+        using var clientA = new VirtualNetworkTunnel(tunA, optionsA, entry => logs.Enqueue($"client-a: {entry.Message}"));
+        using var clientB = new VirtualNetworkTunnel(tunB, optionsB, entry => logs.Enqueue($"client-b: {entry.Message}"));
+        await clientA.StartAsync();
+        await clientB.StartAsync();
+        await Task.Delay(TimeSpan.FromSeconds(3));
+
+        tunA.Inject(CreateIPv4EchoPacket("10.66.0.2", "10.66.0.4"));
+        var received = await tunB.WaitForPacketAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Equal("10.66.0.4", new IPAddress(received.AsSpan(16, 4)).ToString());
+        Assert.Contains(logs, line => line.Contains("relay path selected for 10.66.0.4", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(logs, line => line.Contains("direct path selected for 10.66.0.4", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
     public async Task ThreeNodesForwardPacketAcrossLowestCostMeshPath()
     {
         var authenticationKey = RandomNumberGenerator.GetBytes(32);
@@ -75,6 +110,7 @@ public sealed class MeshUdpIntegrationTests
             AuthenticationKey = authenticationKey,
             HeartbeatInterval = TimeSpan.FromSeconds(1),
             PeerTimeout = TimeSpan.FromSeconds(6),
+            IncludeLocalInterfaceCandidates = false,
             DirectPathExcludedAddresses = excludedAddresses.Select(IPAddress.Parse).ToArray()
         };
     }

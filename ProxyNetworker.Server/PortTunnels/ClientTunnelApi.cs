@@ -1,4 +1,5 @@
 using System.Net.WebSockets;
+using Microsoft.Extensions.Options;
 using ProxyNetworker.Server.Management;
 using ProxyNetworker.Server.VirtualNetworks;
 
@@ -70,7 +71,8 @@ public static class ClientTunnelApi
     private static async Task<IResult> GetVirtualNetworkClientConfig(
         HttpContext httpContext,
         VirtualNetworkAccessService accessService,
-        VirtualNetworkRuntimeRegistry runtimeRegistry)
+        VirtualNetworkRuntimeRegistry runtimeRegistry,
+        IOptions<NetworkDefaultsOptions> networkDefaults)
     {
         var token = ReadToken(httpContext.Request);
         var grant = await accessService.ValidateVirtualNetworkTokenAsync(token, httpContext.RequestAborted).ConfigureAwait(false);
@@ -96,7 +98,7 @@ public static class ClientTunnelApi
         return TypedResults.Ok(new VirtualNetworkClientConfigResponse(
             grant.Definition.Id,
             grant.Definition.Name,
-            ResolveServerHost(httpContext.Request),
+            ResolveServerHost(httpContext.Request, networkDefaults.Value.AdvertisedHost),
             grant.Definition.ListenPort,
             grant.Definition.GatewayAddress,
             grant.ClientAddress.ToString(),
@@ -106,8 +108,13 @@ public static class ClientTunnelApi
             Convert.ToBase64String(authenticationKey)));
     }
 
-    private static string ResolveServerHost(HttpRequest request)
+    private static string ResolveServerHost(HttpRequest request, string? advertisedHost)
     {
+        if (!string.IsNullOrWhiteSpace(advertisedHost))
+        {
+            return advertisedHost.Trim();
+        }
+
         if (!request.Headers.TryGetValue("X-Forwarded-Host", out var forwardedHost) ||
             string.IsNullOrWhiteSpace(forwardedHost.ToString()))
         {

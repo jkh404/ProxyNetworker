@@ -13,7 +13,8 @@ internal enum VirtualNetworkFrameType : byte
     PathProbe = 5,
     PathProbeAck = 6,
     MeshLinkState = 7,
-    MeshPacket = 8
+    MeshPacket = 8,
+    RelayRequired = 9
 }
 
 internal readonly struct VirtualNetworkFrame
@@ -102,7 +103,8 @@ internal readonly struct VirtualNetworkFrame
             VirtualNetworkFrameType.PathProbe or
             VirtualNetworkFrameType.PathProbeAck or
             VirtualNetworkFrameType.MeshLinkState or
-            VirtualNetworkFrameType.MeshPacket))
+            VirtualNetworkFrameType.MeshPacket or
+            VirtualNetworkFrameType.RelayRequired))
         {
             return false;
         }

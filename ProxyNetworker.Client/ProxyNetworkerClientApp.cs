@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using ProxyNetworker.Core;
 using ProxyNetworker.Core.Platforms.Linux;
@@ -484,6 +485,19 @@ internal static class ProxyNetworkerClientApp
         return token.Contains("replace_this_token", StringComparison.OrdinalIgnoreCase);
     }
 
+    private static bool IsLocalEndPoint(IPEndPoint endPoint)
+    {
+        if (IPAddress.IsLoopback(endPoint.Address))
+        {
+            return true;
+        }
+
+        return NetworkInterface.GetAllNetworkInterfaces()
+            .Where(static networkInterface => networkInterface.OperationalStatus == OperationalStatus.Up)
+            .SelectMany(static networkInterface => networkInterface.GetIPProperties().UnicastAddresses)
+            .Any(unicast => unicast.Address.Equals(endPoint.Address));
+    }
+
     private static async Task<IDisposable> StartVirtualNetworkDirectAsync(DirectVirtualNetworkClientConfig config, CancellationToken cancellationToken)
     {
         var tunAddress = IPAddress.Parse(config.TunAddress);
@@ -509,8 +523,14 @@ internal static class ProxyNetworkerClientApp
                 PrefixLength = config.PrefixLength,
                 NodeName = string.IsNullOrWhiteSpace(config.NodeDisplayName) ? config.Name : config.NodeDisplayName,
                 AuthenticationKey = config.AuthenticationKey,
-                EnableDirectPaths = !config.RelayOnly
+                EnableDirectPaths = !config.RelayOnly && !IsLocalEndPoint(remoteEndPoint)
             };
+            if (!config.RelayOnly && !options.EnableDirectPaths)
+            {
+                WriteLog(new ProxyNetworkerLogEntry(
+                    ProxyNetworkerLogLevel.Information,
+                    $"Virtual Network server endpoint {remoteEndPoint} is local; using relay-only mode to avoid NAT hairpin routing."));
+            }
             IDisposable tunnel = VirtualNetworkTransportProtocols.UsesReliableStream(config.TransportProtocol)
                 ? new VirtualNetworkStreamTunnel(tunDevice, options, config.TransportProtocol, WriteLog)
                 : new VirtualNetworkTunnel(tunDevice, options, WriteLog);

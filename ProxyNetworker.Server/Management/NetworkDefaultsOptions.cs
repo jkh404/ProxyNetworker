@@ -21,6 +21,13 @@ public sealed class NetworkDefaultsOptions
     public string PublicListenAddress { get; init; } = "0.0.0.0";
 
     /// <summary>
+    /// Hostname or IPv4 address advertised to clients for virtual network data connections.
+    /// Set this when the management API is reached through a reverse proxy or SSH tunnel;
+    /// an empty value keeps the previous request-host fallback behavior.
+    /// </summary>
+    public string? AdvertisedHost { get; init; }
+
+    /// <summary>
     /// Default IPv4 gateway assigned to a new virtual network when no gateway is provided.
     /// Existing virtual network definitions keep their stored gateway.
     /// </summary>
@@ -56,6 +63,14 @@ public sealed class NetworkDefaultsOptionsValidator : IValidateOptions<NetworkDe
             gatewayAddress.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork)
         {
             return ValidateOptionsResult.Fail("NetworkDefaults:VirtualNetworkGatewayAddress must be a valid IPv4 address.");
+        }
+
+        if (!string.IsNullOrWhiteSpace(options.AdvertisedHost) &&
+            (options.AdvertisedHost.Contains("://", StringComparison.Ordinal) ||
+             options.AdvertisedHost.Contains('/', StringComparison.Ordinal) ||
+             Uri.CheckHostName(options.AdvertisedHost.Trim()) == UriHostNameType.Unknown))
+        {
+            return ValidateOptionsResult.Fail("NetworkDefaults:AdvertisedHost must be a hostname or IP address without a scheme, path, or port.");
         }
 
         return ValidateOptionsResult.Success;

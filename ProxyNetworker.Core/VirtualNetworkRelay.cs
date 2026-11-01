@@ -218,6 +218,17 @@ public sealed class VirtualNetworkRelay : IVirtualNetworkRelay
                 await BroadcastPeerCandidatesAsync(candidatePeer, cancellationToken).ConfigureAwait(false);
                 break;
 
+            case VirtualNetworkFrameType.RelayRequired:
+                var relayPeer = RegisterPeer(frame.VirtualAddress, remoteEndPoint);
+                if (relayPeer is null)
+                {
+                    return;
+                }
+
+                relayPeer.RelayRequired = frame.Payload.Length > 0 && frame.Payload.Span[0] != 0;
+                await BroadcastPeerCandidatesAsync(relayPeer, cancellationToken).ConfigureAwait(false);
+                break;
+
             case VirtualNetworkFrameType.MeshLinkState:
                 if (RegisterPeer(frame.VirtualAddress, remoteEndPoint) is not null)
                 {
@@ -366,7 +377,9 @@ public sealed class VirtualNetworkRelay : IVirtualNetworkRelay
             peers = _peersByAddress.Values.ToArray();
         }
 
-        var endpoints = new[] { peer.EndPoint }.Concat(peer.LocalEndPoints);
+        var endpoints = peer.RelayRequired
+            ? Array.Empty<IPEndPoint>()
+            : new[] { peer.EndPoint }.Concat(peer.LocalEndPoints).ToArray();
         var payload = VirtualNetworkCandidateCodec.Encode(endpoints);
         foreach (var target in peers)
         {
@@ -578,6 +591,8 @@ public sealed class VirtualNetworkRelay : IVirtualNetworkRelay
         public IPEndPoint EndPoint { get; set; }
 
         public List<IPEndPoint> LocalEndPoints { get; } = new();
+
+        public bool RelayRequired { get; set; }
 
         public DateTimeOffset LastSeen { get; set; }
 

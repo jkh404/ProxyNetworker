@@ -5,6 +5,7 @@
 | 配置项 | 示例 | 用途 |
 | --- | --- | --- |
 | `PublicListenAddress` | `0.0.0.0` | 端口穿透和虚拟网络公网端口的 IPv4 监听地址。与管理 API 的 `urls` 独立配置。 |
+| `AdvertisedHost` | `www.example.com` | 下发给客户端的数据端口主机名或 IP。通过反向代理、SSH 隧道访问管理 API 时必须显式配置，避免客户端拿到 `127.0.0.1`。 |
 | `VirtualNetworkGatewayAddress` | `10.66.0.1` | 新建虚拟网络未指定网关时使用的默认 IPv4 网关。已有网络保留数据库中的网关。 |
 | `VirtualNetworkPrefixLength` | `24` | 新建虚拟网络的默认前缀长度，允许范围为 `1` 到 `30`。 |
 | `VirtualNetworkMtu` | `1400` | 新建虚拟网络的默认 MTU，允许范围为 `576` 到 `65535`。 |
@@ -56,6 +57,7 @@
 {
   "NetworkDefaults": {
     "PublicListenAddress": "0.0.0.0",
+    "AdvertisedHost": "www.example.com",
     "VirtualNetworkGatewayAddress": "10.66.0.1",
     "VirtualNetworkPrefixLength": 24,
     "VirtualNetworkMtu": 1400

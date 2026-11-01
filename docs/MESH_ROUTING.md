@@ -85,6 +85,8 @@ Path: relay 10.66.0.2 -> 10.66.0.4 (2.1 ms)
 ## 故障处理
 
 - 候选探测失败按单个端点隔离，不终止整个心跳循环。
+- 单节点探测出现 socket 错误时，该节点的直连路径进入默认 30 秒冷却期；共享 UDP socket 收到连接重置时暂停全部直连并回退中继。
+- relay-only 客户端发送 `RelayRequired`，服务端停止向其他节点广播它的直连候选，避免别人继续向它发起不可用连接。
 - 超过 `PeerTimeout` 未成功的直连路径不再参与路由。
 - 链路状态超过两倍 `PeerTimeout` 未更新时从路由图中移除。
 - 节点封禁由服务端拒绝注册、候选广播和 Mesh 数据帧转发。
@@ -121,5 +123,6 @@ QUIC 当前提供加密可靠流和服务端中继，不提供 P2P mesh。主要
 - 链路状态编解码。
 - Mesh Packet Hop Limit。
 - 三节点 `A -> C -> B` UDP 端到端数据转发。
+- relay-only 节点不会被广播为直连候选，其他节点实际选择服务端中继。
 
-本地已通过 Release 构建、4 个自动测试、Windows x64 Native AOT 发布和 Linux x64 服务端发布。真实公网 `Windows -> Ubuntu -> Raspberry Pi` 多跳测试仍应在部署候选版本后单独执行。
+本地已通过 Release 构建、5 个自动测试、Windows x64 Native AOT 发布和 Linux x64 服务端发布。真实公网 `Windows -> Ubuntu -> Raspberry Pi` 多跳测试仍应在部署候选版本后单独执行。

@@ -175,6 +175,7 @@ dotnet script ".\通用dotnet编译发布脚本.csx" -- ".\ProxyNetworker.Client
 - `urls`：管理页面和管理 API 的监听地址。
 - `SystemSettings.PublicPortRangeStart` 和 `PublicPortRangeEnd`：动态公网端口范围。
 - `NetworkDefaults.PublicListenAddress`：端口穿透和虚拟网络数据端口监听地址。
+- `NetworkDefaults.AdvertisedHost`：通过反向代理或隧道访问管理 API 时，下发给客户端的数据端口主机名。
 - `NetworkDefaults.VirtualNetworkGatewayAddress`：新虚拟网络默认网关。
 - `NetworkDefaults.VirtualNetworkPrefixLength`：新虚拟网络默认地址前缀。
 - `NetworkDefaults.VirtualNetworkMtu`：新虚拟网络默认 MTU。
@@ -197,6 +198,7 @@ dotnet script ".\通用dotnet编译发布脚本.csx" -- ".\ProxyNetworker.Client
 - [服务端配置说明](ProxyNetworker.Server/README.Configuration.md)
 - [虚拟网络协议与测试结果](ProxyNetworker.Server/README.Protocols.md)
 - [UDP 网状路由架构](docs/MESH_ROUTING.md)
+- [四节点虚拟局域网测试与改进报告](docs/2026-11-01-vnet-aot-smart-routing-report.md)
 - [发布新版本](RELEASING.md)
 
 ## 发布版本

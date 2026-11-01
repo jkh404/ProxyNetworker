@@ -22,11 +22,15 @@ public class VirtualNetworkTunnelOptions
 
     public IReadOnlyCollection<IPAddress> DirectPathExcludedAddresses { get; set; } = Array.Empty<IPAddress>();
 
+    public bool IncludeLocalInterfaceCandidates { get; set; } = true;
+
     public int MaxPacketSize { get; set; } = 65535;
 
     public TimeSpan HeartbeatInterval { get; set; } = TimeSpan.FromSeconds(5);
 
     public TimeSpan PeerTimeout { get; set; } = TimeSpan.FromSeconds(20);
+
+    public TimeSpan DirectPathFailureCooldown { get; set; } = TimeSpan.FromSeconds(30);
 
     public void Validate()
     {
@@ -58,6 +62,11 @@ public class VirtualNetworkTunnelOptions
         if (PeerTimeout <= HeartbeatInterval)
         {
             throw new ArgumentOutOfRangeException(nameof(PeerTimeout), PeerTimeout, "Peer timeout must be greater than the heartbeat interval.");
+        }
+
+        if (DirectPathFailureCooldown < TimeSpan.FromSeconds(1))
+        {
+            throw new ArgumentOutOfRangeException(nameof(DirectPathFailureCooldown), DirectPathFailureCooldown, "Direct path failure cooldown must be at least one second.");
         }
 
         if (AuthenticationKey is not { Length: 32 })
