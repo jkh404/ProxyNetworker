@@ -1,0 +1,384 @@
+name: Release
+run-name: Release ${{ inputs.tag || github.ref_name }}
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build, for example v1.0.0'
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  DOTNET_VERSION: '10.0.x'
+  DOTNET_NOLOGO: 'true'
+  DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 'true'
+
+jobs:
+  version:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
+      prerelease: ${{ steps.resolve.outputs.prerelease }}
+    steps:
+      - name: Validate release tag
+        id: resolve
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+
+          tag="$REF_NAME"
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            tag="$INPUT_TAG"
+          fi
+
+          tag="${tag//[[:space:]]/}"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid release tag: $tag" >&2
+            echo "Expected a semantic version tag such as v1.0.0 or v1.0.0-rc.1." >&2
+            exit 1
+          fi
+
+          version="${tag#v}"
+          prerelease=false
+          if [[ "$tag" == *-* ]]; then
+            prerelease=true
+          fi
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Release version"
+            echo ""
+            echo "- Tag: \`$tag\`"
+            echo "- Version: \`$version\`"
+            echo "- Prerelease: \`$prerelease\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  client-windows:
+    name: Client win-x64
+    needs: version
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      TAG: ${{ needs.version.outputs.tag }}
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.version.outputs.tag }}
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restore
+        shell: pwsh
+        run: dotnet restore .\ProxyNetworker.Client\ProxyNetworker.Client.csproj -r win-x64 -p:Version=$env:VERSION
+
+      - name: Publish Native AOT client
+        shell: pwsh
+        run: |
+          dotnet publish .\ProxyNetworker.Client\ProxyNetworker.Client.csproj `
+            -c Release `
+            -r win-x64 `
+            --self-contained true `
+            -p:PublishAot=true `
+            -p:Version=$env:VERSION `
+            -p:ContinuousIntegrationBuild=true `
+            -p:DebugType=None `
+            -p:DebugSymbols=false `
+            -o "$env:GITHUB_WORKSPACE\dist\client-win-x64"
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $publishDir = Join-Path $env:GITHUB_WORKSPACE 'dist\client-win-x64'
+          $stage = Join-Path $env:GITHUB_WORKSPACE 'dist\package\client-win-x64'
+          $artifactDir = Join-Path $env:GITHUB_WORKSPACE 'artifacts'
+          New-Item -ItemType Directory -Path $stage -Force | Out-Null
+          New-Item -ItemType Directory -Path $artifactDir -Force | Out-Null
+
+          $required = @('ProxyNetworker.Client.exe', 'wintun.dll', 'msquic.dll', 'appsettings.json')
+          foreach ($file in $required) {
+            if (-not (Test-Path -LiteralPath (Join-Path $publishDir $file))) {
+              throw "Missing required release file: $file"
+            }
+          }
+
+          Copy-Item -Path (Join-Path $publishDir '*') -Destination $stage -Recurse -Force
+          Copy-Item -LiteralPath 'ProxyNetworker.Client\README.md' -Destination (Join-Path $stage 'README.md')
+          Copy-Item -LiteralPath 'LICENSE' -Destination (Join-Path $stage 'LICENSE')
+          Get-ChildItem -Path $stage -Recurse -File -Filter '*.pdb' | Remove-Item -Force
+
+          $archive = Join-Path $artifactDir "ProxyNetworker.Client_win-x64_$env:TAG.zip"
+          Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $archive -CompressionLevel Optimal
+          Get-Item -LiteralPath $archive | Select-Object FullName, Length
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: client-win-x64
+          path: artifacts/ProxyNetworker.Client_win-x64_*.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  client-linux:
+    name: Client ${{ matrix.rid }}
+    needs: version
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rid: linux-x64
+            runner: ubuntu-24.04
+          - rid: linux-arm64
+            runner: ubuntu-24.04-arm
+    env:
+      TAG: ${{ needs.version.outputs.tag }}
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.version.outputs.tag }}
+
+      - name: Install Native AOT dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang zlib1g-dev libssl-dev
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restore
+        shell: bash
+        run: dotnet restore ProxyNetworker.Client/ProxyNetworker.Client.csproj -r "${{ matrix.rid }}" -p:Version="$VERSION"
+
+      - name: Publish Native AOT client
+        shell: bash
+        run: |
+          dotnet publish ProxyNetworker.Client/ProxyNetworker.Client.csproj \
+            -c Release \
+            -r "${{ matrix.rid }}" \
+            --self-contained true \
+            -p:PublishAot=true \
+            -p:StripSymbols=true \
+            -p:Version="$VERSION" \
+            -p:ContinuousIntegrationBuild=true \
+            -p:DebugType=None \
+            -p:DebugSymbols=false \
+            -o "dist/client-${{ matrix.rid }}"
+
+      - name: Package
+        shell: bash
+        env:
+          RID: ${{ matrix.rid }}
+        run: |
+          set -euo pipefail
+          stage="dist/package/client-$RID"
+          mkdir -p "$stage" artifacts
+          cp -a "dist/client-$RID/." "$stage/"
+          cp ProxyNetworker.Client/README.md "$stage/README.md"
+          cp LICENSE "$stage/LICENSE"
+          rm -f "$stage"/*.dbg "$stage"/*.pdb
+          chmod 0755 "$stage/ProxyNetworker.Client" "$stage/run.sh"
+
+          test -x "$stage/ProxyNetworker.Client"
+          test -x "$stage/run.sh"
+          test -f "$stage/appsettings.json"
+          if [[ "$RID" == "linux-x64" ]]; then
+            test -f "$stage/libmsquic.so.2"
+          fi
+
+          archive="artifacts/ProxyNetworker.Client_${RID}_${TAG}.tar.gz"
+          tar -czf "$archive" -C "$stage" .
+          ls -lh "$archive"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: client-${{ matrix.rid }}
+          path: artifacts/ProxyNetworker.Client_${{ matrix.rid }}_*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  server-linux:
+    name: Server linux-x64
+    needs: version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      TAG: ${{ needs.version.outputs.tag }}
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.version.outputs.tag }}
+
+      - name: Install native dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libnuma1
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restore
+        shell: bash
+        run: dotnet restore ProxyNetworker.Server/ProxyNetworker.Server.csproj -r linux-x64 -p:Version="$VERSION"
+
+      - name: Publish self-contained server
+        shell: bash
+        run: |
+          dotnet publish ProxyNetworker.Server/ProxyNetworker.Server.csproj \
+            -c Release \
+            -r linux-x64 \
+            --self-contained true \
+            -p:PublishSingleFile=false \
+            -p:Version="$VERSION" \
+            -p:ContinuousIntegrationBuild=true \
+            -p:DebugType=None \
+            -p:DebugSymbols=false \
+            -o dist/server-linux-x64
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage="dist/package/server-linux-x64"
+          mkdir -p "$stage" artifacts
+          cp -a dist/server-linux-x64/. "$stage/"
+
+          libnuma="$(ldconfig -p | awk '/libnuma.so.1/{print $NF; exit}')"
+          test -n "$libnuma"
+          cp "$libnuma" "$stage/libnuma.so.1"
+          ln -sfn libmsquic.so.2 "$stage/libmsquic.so"
+
+          cp ProxyNetworker.Server/README.Docker.md "$stage/README.md"
+          cp ProxyNetworker.Server/README.Configuration.md "$stage/README.Configuration.md"
+          cp ProxyNetworker.Server/README.Protocols.md "$stage/README.Protocols.md"
+          cp LICENSE "$stage/LICENSE"
+          chmod 0755 "$stage/ProxyNetworker.Server"
+
+          test -x "$stage/ProxyNetworker.Server"
+          test -f "$stage/appsettings.json"
+          test -f "$stage/wwwroot/index.html"
+          test -f "$stage/libmsquic.so.2"
+          test -L "$stage/libmsquic.so"
+          test -f "$stage/libnuma.so.1"
+
+          archive="artifacts/ProxyNetworker.Server_linux-x64_${TAG}.tar.gz"
+          tar -czf "$archive" -C "$stage" .
+          ls -lh "$archive"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: server-linux-x64
+          path: artifacts/ProxyNetworker.Server_linux-x64_*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish GitHub Release
+    needs:
+      - version
+      - client-windows
+      - client-linux
+      - server-linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      TAG: ${{ needs.version.outputs.tag }}
+      VERSION: ${{ needs.version.outputs.version }}
+      PRERELEASE: ${{ needs.version.outputs.prerelease }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.version.outputs.tag }}
+          fetch-depth: 0
+
+      - name: Download release files
+        uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          find . -maxdepth 1 -type f \( -name '*.zip' -o -name '*.tar.gz' \) -printf '%f\n' \
+            | LC_ALL=C sort \
+            | xargs -r sha256sum > SHA256SUMS.txt
+          test "$(wc -l < SHA256SUMS.txt)" -eq 4
+          cat SHA256SUMS.txt
+
+      - name: Create or update release
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          files=(*.zip *.tar.gz SHA256SUMS.txt)
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${files[@]}" --clobber
+          else
+            args=(release create "$TAG" "${files[@]}" --title "ProxyNetworker $TAG" --generate-notes --verify-tag)
+            if [[ "$PRERELEASE" == "true" ]]; then
+              args+=(--prerelease)
+            fi
+            gh "${args[@]}"
+          fi
+
+      - name: Write release summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "### Published $TAG"
+            echo ""
+            echo "| Asset | Size |"
+            echo "| --- | ---: |"
+            find dist -maxdepth 1 -type f \( -name '*.zip' -o -name '*.tar.gz' -o -name 'SHA256SUMS.txt' \) -printf '%f\n' \
+              | LC_ALL=C sort \
+              | while IFS= read -r file; do
+                  size="$(du -h "dist/$file" | cut -f1)"
+                  echo "| \`$file\` | $size |"
+                done
+          } >> "$GITHUB_STEP_SUMMARY"

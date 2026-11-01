@@ -1,5 +1,7 @@
 # ProxyNetworker
 
+[![Release](https://github.com/jkh404/ProxyNetworker/actions/workflows/release.yml/badge.svg)](https://github.com/jkh404/ProxyNetworker/actions/workflows/release.yml)
+
 ProxyNetworker 是一个面向自托管场景的网络工具，提供公网端口穿透和加密虚拟局域网能力。项目由 ASP.NET Core 服务端、跨平台客户端和共享网络核心组成。
 
 ## 项目亮点
@@ -192,6 +194,18 @@ dotnet script ".\通用dotnet编译发布脚本.csx" -- ".\ProxyNetworker.Client
 - [服务端 Docker 部署](ProxyNetworker.Server/README.Docker.md)
 - [服务端配置说明](ProxyNetworker.Server/README.Configuration.md)
 - [虚拟网络协议与测试结果](ProxyNetworker.Server/README.Protocols.md)
+- [发布新版本](RELEASING.md)
+
+## 发布版本
+
+推送 `v1.2.3` 形式的语义化版本标签后，GitHub Actions 会自动构建 Windows x64、Linux x64、Linux ARM64 客户端和 Linux x64 服务端，并创建 GitHub Release。
+
+```bash
+git tag -a v1.2.3 -m "ProxyNetworker v1.2.3"
+git push origin v1.2.3
+```
+
+完整流程见 [发布说明](RELEASING.md)。
 
 ## 许可证
 
