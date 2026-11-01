@@ -17,7 +17,7 @@ See [UDP 网状路由架构](../docs/MESH_ROUTING.md) for the control-plane form
 
 Test date: 2026-11-01
 
-Topology: `<node37-public-ip>` to `<server-public-ip>`, relay-only, same server process. Each protocol used three rounds of 100 ICMP echo requests after warm-up. These figures measure server relay behavior and do not represent UDP direct or multi-hop mesh latency.
+Topology: `<client-node-public-ip>` to `<server-node-public-ip>`, relay-only, same server process. Each protocol used three rounds of 100 ICMP echo requests after warm-up. These figures measure server relay behavior and do not represent UDP direct or multi-hop mesh latency.
 
 | Protocol | Samples | Loss | Min | Avg | P50 | P95 | P99 | Max |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|

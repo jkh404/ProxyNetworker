@@ -13,20 +13,20 @@
 
 ## 1. 测试目标
 
-使用 4 个节点组建虚拟局域网，并由 <server-public-ip> 作为服务端、虚拟网络节点和公网访问入口：
+使用 4 个节点组建虚拟局域网，并由 `<server-public-ip>` 作为服务端、虚拟网络节点和公网访问入口：
 
 | 节点 | 公网地址 | 内网地址 | 虚拟地址 | 客户端位置与模式 |
 |---|---|---|---|---|
-| <server-node> Server + Node | <server-public-ip> | <server-lan-ip> | <vn-ip-server-node> | <client-install-path>，AOT，smart |
-| <node37> | <node37-public-ip> | <node37-lan-ip> | <vn-ip-node37> | <client-install-path>，AOT，smart |
-| 树莓派 | 家庭公网出口 | <pi-home-lan-ip> | <vn-ip-pi> | <client-install-path>，AOT |
-| Windows 本机 | 家庭公网出口 | <windows-home-lan-ip> | <vn-ip-windows> | <client-install-path>，AOT，relay-only |
+| Server + Node | `<server-public-ip>` | `<server-lan-ip>` | `<vn-ip-server-node>` | `<client-install-path>`，AOT，smart |
+| Node 37 | `<node37-public-ip>` | `<node37-lan-ip>` | `<vn-ip-node37>` | `<client-install-path>`，AOT，smart |
+| 树莓派 | 家庭公网出口 | `<pi-home-lan-ip>` | `<vn-ip-pi>` | `<client-install-path>`，AOT |
+| Windows 本机 | 家庭公网出口 | `<windows-home-lan-ip>` | `<vn-ip-windows>` | `<client-install-path>`，AOT，relay-only |
 
 网络名称：sky-mesh-20261101
-网段：<virtual-subnet>/24
-网关：<virtual-gateway>
+网段：`<virtual-subnet>/24`
+网关：`<virtual-gateway>`
 协议：UDP（智能直连/中继）
-服务端口：<data-port>/UDP
+服务端口：`<data-port>/UDP`
 
 ## 2. 已验证能力
 
@@ -39,9 +39,9 @@
    - <node37> -> <server-node> direct
 4. 路径探测失败后具备回退 relay 的设计；Windows 日志中曾出现 direct 超时后重新选择 relay。
 5. <server-node> 作为公网入口的端口映射验证成功：
-   - <published-port-1>/TCP -> <vn-ip-windows>:<http-port>（Windows HTTP）
-   - <published-port-2>/TCP -> <vn-ip-node37>:<http-port>（<node37> HTTP）
-   - <published-port-3>/TCP -> <vn-ip-pi>:22（树莓派 SSH Banner）
+   - `<published-port-1>/TCP` -> `<vn-ip-windows>:<http-port>`（Windows HTTP）
+   - `<published-port-2>/TCP` -> `<vn-ip-node37>:<http-port>`（Node 37 HTTP）
+   - `<published-port-3>/TCP` -> `<vn-ip-pi>:22`（树莓派 SSH Banner）
 6. Windows AOT 客户端修复后，其他节点可通过 relay 稳定访问 Windows 服务。
 7. 后续新增的 UDP mesh 路由支持基于 RTT、抖动、丢包率和跳数计算最低成本路径，并支持 `A -> C -> B` 多跳转发、8 跳上限、防环和服务端中继兜底。实现和边界见 `docs/MESH_ROUTING.md`。
 
@@ -78,8 +78,8 @@
 现象：<node37> 的 UFW 和 Windows Firewall 默认拦截虚拟网入站。表现与路由故障完全一致。
 
 已验证规则：
-- Linux：ufw allow from <virtual-subnet>/24
-- Windows：入站允许 RemoteAddress <virtual-subnet>/24
+- Linux：`ufw allow from <virtual-subnet>/24`
+- Windows：入站允许 `RemoteAddress <virtual-subnet>/24`
 
 建议：
 - 客户端加入网络后检测本机防火墙状态，并给出精确的待执行命令。
@@ -119,9 +119,9 @@
 
 ### P1：Token 模式的服务端地址从请求 Host 推导
 
-现象：客户端通过 SSH 隧道访问 http://127.0.0.1:13301 时，服务端配置返回 serverHost=127.0.0.1，导致客户端把它自己的 loopback 当成 <data-port>/UDP 服务端。
+现象：客户端通过 SSH 隧道访问 `<loopback>:<management-port>` 时，服务端配置返回 `serverHost=<loopback>`，导致客户端把它自己的 loopback 当成 `<data-port>/UDP` 服务端。
 
-临时解决：在树莓派增加 Host 重写代理，把 Host 改为 <server-public-ip>:13301。
+临时解决：在树莓派增加 Host 重写代理，把 Host 改为 `<server-host>:<management-port>`。
 
 当前修复：新增 `NetworkDefaults.AdvertisedHost`。配置后服务端优先向客户端下发该主机，不再依赖请求 Host 或 `X-Forwarded-Host`。已纳入 `v1.0.2`。
 
@@ -161,11 +161,11 @@
 
 ## 4. 建议优先级
 
-1. 提交 Windows WSAECONNRESET 修复和 `AdvertisedHost`，生成下一版本标签并跑三平台 AOT。
-2. 实现 RelayRequired/自动 relay-only 降级，解决探测与数据面不一致。
+1. Windows WSAECONNRESET 修复、`AdvertisedHost` 和三平台 AOT 已完成并纳入 `v1.0.2`。
+2. RelayRequired、同机自动 relay-only 和直连故障冷却已完成并纳入 `v1.0.2`。
 3. 增加 Linux/Windows 防火墙自检与精确引导。
 4. 修复端口隧道创建接口挂起和前端超时。
-5. 增加 AdvertisedHost/ServerHostOverride，消除隧道场景下的 127.0.0.1 推导错误。
+5. `AdvertisedHost` 已完成；后续可增加客户端 `ServerHostOverride` 作为额外覆盖入口。
 6. 提供 Linux systemd 与 Windows 服务化部署。
 7. 增加路径质量 UI 和四节点 CI/集成测试。
 
@@ -175,5 +175,4 @@
 - 已停止 3 个临时端口隧道客户端。
 - 已停止 <node37>、Windows 临时 HTTP 服务。
 - 已保留虚拟网络 sky-mesh-20261101 和 4 个节点。
-- 已保留数据库测试前备份：
-  <database-backup-path>
+- 已保留数据库测试前备份：`<database-backup-path>`
