@@ -11,7 +11,9 @@ internal enum VirtualNetworkFrameType : byte
     Heartbeat = 3,
     PeerCandidates = 4,
     PathProbe = 5,
-    PathProbeAck = 6
+    PathProbeAck = 6,
+    MeshLinkState = 7,
+    MeshPacket = 8
 }
 
 internal readonly struct VirtualNetworkFrame
@@ -98,7 +100,9 @@ internal readonly struct VirtualNetworkFrame
             VirtualNetworkFrameType.Heartbeat or
             VirtualNetworkFrameType.PeerCandidates or
             VirtualNetworkFrameType.PathProbe or
-            VirtualNetworkFrameType.PathProbeAck))
+            VirtualNetworkFrameType.PathProbeAck or
+            VirtualNetworkFrameType.MeshLinkState or
+            VirtualNetworkFrameType.MeshPacket))
         {
             return false;
         }

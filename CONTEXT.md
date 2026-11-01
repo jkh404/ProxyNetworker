@@ -24,6 +24,22 @@ _Avoid_: Host, machine, client
 The remote Node currently exchanging tunnel traffic with this Node.
 _Avoid_: Remote, endpoint
 
+**Direct Path**:
+A route where the source Node sends Virtual Network traffic directly to the destination Node without server relay.
+_Avoid_: P2P connection when referring to a measured route
+
+**Mesh Route**:
+The lowest-cost directed path between two Nodes, possibly forwarding traffic through one or more intermediate Nodes.
+_Avoid_: Shortest IP route, VPN tunnel
+
+**Link-State Advertisement**:
+A control message that publishes a Node's currently usable direct neighbors and their RTT, jitter, and loss metrics.
+_Avoid_: Routing table, heartbeat
+
+**Relay Fallback**:
+The server-forwarded path used when no healthy Direct Path or Mesh Route is available.
+_Avoid_: Mesh route, direct path
+
 **Private Service**:
 A TCP or UDP service reachable from a ProxyNetworker Client but not directly reachable from the public network.
 _Avoid_: Upstream, target

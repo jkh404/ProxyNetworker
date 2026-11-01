@@ -18,6 +18,10 @@ public class VirtualNetworkTunnelOptions
 
     public bool EnableDirectPaths { get; set; } = true;
 
+    public IReadOnlyCollection<IPEndPoint> AdditionalCandidateEndPoints { get; set; } = Array.Empty<IPEndPoint>();
+
+    public IReadOnlyCollection<IPAddress> DirectPathExcludedAddresses { get; set; } = Array.Empty<IPAddress>();
+
     public int MaxPacketSize { get; set; } = 65535;
 
     public TimeSpan HeartbeatInterval { get; set; } = TimeSpan.FromSeconds(5);
@@ -59,6 +63,23 @@ public class VirtualNetworkTunnelOptions
         if (AuthenticationKey is not { Length: 32 })
         {
             throw new ArgumentException("Virtual Network authentication key must be 32 bytes.", nameof(AuthenticationKey));
+        }
+
+        foreach (var endpoint in AdditionalCandidateEndPoints)
+        {
+            if (endpoint.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork ||
+                endpoint.Port is <= 0 or > ushort.MaxValue)
+            {
+                throw new ArgumentException("Additional candidate endpoints must be valid IPv4 endpoints.", nameof(AdditionalCandidateEndPoints));
+            }
+        }
+
+        foreach (var address in DirectPathExcludedAddresses)
+        {
+            if (address.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork)
+            {
+                throw new ArgumentException("Direct path exclusions must be IPv4 addresses.", nameof(DirectPathExcludedAddresses));
+            }
         }
     }
 }

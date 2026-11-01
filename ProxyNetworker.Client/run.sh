@@ -66,7 +66,7 @@ show_connection_summary() {
             local path_line path_type path_peer path_endpoint path_rtt
             path_line="$(grep -a 'Virtual Network .* path selected' "$log_file" 2>/dev/null | tail -n 1 || true)"
             if [ -n "$path_line" ]; then
-                path_type="$(printf '%s\n' "$path_line" | sed -n 's/.*Virtual Network \(direct\|relay\) path selected.*/\1/p')"
+                path_type="$(printf '%s\n' "$path_line" | sed -n 's/.*Virtual Network \(direct\|mesh\|relay\) path selected.*/\1/p')"
                 path_peer="$(printf '%s\n' "$path_line" | sed -n 's/.* selected for \([^ ]*\) via.*/\1/p')"
                 path_endpoint="$(printf '%s\n' "$path_line" | sed -n 's/.* via \([^ ]*\) (.*/\1/p')"
                 path_rtt="$(printf '%s\n' "$path_line" | sed -n 's/.* (\([^)]*\)).*/\1/p')"

@@ -2,16 +2,22 @@
 
 Virtual Network definitions support two transport protocols:
 
-- `udp`: encrypted datagrams with direct-path probing and relay fallback. This is the default.
+- `udp`: encrypted datagrams with latency-aware mesh routing, multi-hop forwarding, and relay fallback. This is the default.
 - `quic`: a reliable encrypted QUIC stream relay.
 
-The protocol is selected when the virtual network is created and is returned to clients by the token configuration endpoint. QUIC currently uses the server relay; direct peer paths remain available only to UDP.
+The protocol is selected when the virtual network is created and is returned to clients by the token configuration endpoint. QUIC currently uses the server relay. Direct and multi-hop peer paths are available only to UDP.
+
+## Mesh Routing
+
+UDP nodes exchange candidate endpoints and link-state advertisements through the server control path. Each directed link carries EWMA RTT, jitter, loss, and a hop penalty. Nodes build the lowest-cost route to every reachable peer and use an 8-hop limit with loop prevention. A node may forward traffic for another peer, and the server relay remains the final fallback when no healthy mesh route exists.
+
+See [UDP 网状路由架构](../docs/MESH_ROUTING.md) for the control-plane format, cost formula, forwarding behavior, security boundary, and test coverage.
 
 ## Benchmark
 
 Test date: 2026-11-01
 
-Topology: `<node37-public-ip>` to `<server-public-ip>`, relay-only, same server process. Each protocol used three rounds of 100 ICMP echo requests after warm-up.
+Topology: `<node37-public-ip>` to `<server-public-ip>`, relay-only, same server process. Each protocol used three rounds of 100 ICMP echo requests after warm-up. These figures measure server relay behavior and do not represent UDP direct or multi-hop mesh latency.
 
 | Protocol | Samples | Loss | Min | Avg | P50 | P95 | P99 | Max |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -22,6 +28,6 @@ KCP was evaluated with `NoDelay`, fast resend, a 1 ms update interval, and conge
 
 ## Recommendation
 
-Keep `udp` as the default protocol. It has the lowest median and tail latency and retains direct-path selection. Offer `quic` as the reliable alternative when packet loss must be hidden.
+Keep `udp` as the default protocol. It has the lowest measured relay latency and additionally supports direct and multi-hop mesh paths. Offer `quic` as the reliable alternative when packet loss must be hidden.
 
 Linux x64 deployments need `libmsquic.so.2` and `libnuma.so.1` available through `LD_LIBRARY_PATH`. Linux arm64 installations can use the distribution `libmsquic` package.

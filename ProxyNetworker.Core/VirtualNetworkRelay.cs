@@ -218,6 +218,13 @@ public sealed class VirtualNetworkRelay : IVirtualNetworkRelay
                 await BroadcastPeerCandidatesAsync(candidatePeer, cancellationToken).ConfigureAwait(false);
                 break;
 
+            case VirtualNetworkFrameType.MeshLinkState:
+                if (RegisterPeer(frame.VirtualAddress, remoteEndPoint) is not null)
+                {
+                    await BroadcastMeshFrameAsync(frame, remoteEndPoint, cancellationToken).ConfigureAwait(false);
+                }
+                break;
+
             case VirtualNetworkFrameType.PathProbe:
             case VirtualNetworkFrameType.PathProbeAck:
                 if (!VirtualNetworkPathProbe.TryParse(frame.Payload.Span, out var probe))
@@ -245,6 +252,39 @@ public sealed class VirtualNetworkRelay : IVirtualNetworkRelay
                     : frame.VirtualAddress;
                 RegisterPeer(sourceAddress, remoteEndPoint);
                 await RoutePacketAsync(frame.Payload, remoteEndPoint, cancellationToken).ConfigureAwait(false);
+                break;
+
+            case VirtualNetworkFrameType.MeshPacket:
+                if (!VirtualNetworkMeshPacket.TryParse(frame.Payload.Span, out var meshPacket))
+                {
+                    return;
+                }
+
+                lock (_peersLock)
+                {
+                    if (_bannedAddresses.Contains(AddressKey(frame.VirtualAddress)))
+                    {
+                        return;
+                    }
+                }
+
+                if (meshPacket.Destination.Equals(_options.NodeAddress))
+                {
+                    return;
+                }
+
+                var meshTarget = FindPeer(meshPacket.Destination);
+                if (meshTarget is null || IsSamePeer(meshTarget.EndPoint, remoteEndPoint))
+                {
+                    return;
+                }
+
+                var forwardedMeshFrame = VirtualNetworkFrame.Create(
+                    VirtualNetworkFrameType.MeshPacket,
+                    frame.VirtualAddress,
+                    frame.Payload.Span,
+                    _options.AuthenticationKey);
+                await SendFrameAsync(forwardedMeshFrame, meshTarget.EndPoint, cancellationToken).ConfigureAwait(false);
                 break;
         }
     }
@@ -341,6 +381,33 @@ public sealed class VirtualNetworkRelay : IVirtualNetworkRelay
                 payload,
                 _options.AuthenticationKey);
             await SendFrameAsync(frame, target.EndPoint, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private async Task BroadcastMeshFrameAsync(
+        VirtualNetworkFrame frame,
+        IPEndPoint sourceEndPoint,
+        CancellationToken cancellationToken)
+    {
+        VirtualNetworkPeer[] peers;
+        lock (_peersLock)
+        {
+            peers = _peersByAddress.Values.ToArray();
+        }
+
+        foreach (var target in peers)
+        {
+            if (IsSamePeer(target.EndPoint, sourceEndPoint))
+            {
+                continue;
+            }
+
+            var forwardedFrame = VirtualNetworkFrame.Create(
+                frame.Type,
+                frame.VirtualAddress,
+                frame.Payload.Span,
+                _options.AuthenticationKey);
+            await SendFrameAsync(forwardedFrame, target.EndPoint, cancellationToken).ConfigureAwait(false);
         }
     }
 

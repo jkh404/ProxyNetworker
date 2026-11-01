@@ -15,6 +15,10 @@
     <PackageReference Include="Vanara.PInvoke.IpHlpApi" Version="5.0.5" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="ProxyNetworker.Core.Tests" />
+  </ItemGroup>
+
   <ItemGroup Condition="'$(RuntimeIdentifier)' == 'linux-x64'">
     <None Include="$(NuGetPackageRoot)stirlinglabs.msquic.bindings.runtime.linux-x64.openssl/2.2.2/runtimes/linux-x64/native/libmsquic-openssl.so"
           Link="libmsquic.so.2"

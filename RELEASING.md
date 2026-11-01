@@ -2,6 +2,8 @@
 
 项目通过 `.github/workflows/release.yml` 自动构建并发布 GitHub Release。工作流不需要额外配置 Secret，使用仓库自带的 `GITHUB_TOKEN` 上传 Release 资产。
 
+发布前会先运行核心路由和 UDP 多跳集成测试；测试失败时不会生成或覆盖 Release。
+
 ## 发布步骤
 
 1. 确认 `master` 已同步并且构建通过。
