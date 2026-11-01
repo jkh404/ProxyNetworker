@@ -2,6 +2,19 @@
 
 ProxyNetworker 是一个面向自托管场景的网络工具，提供公网端口穿透和加密虚拟局域网能力。项目由 ASP.NET Core 服务端、跨平台客户端和共享网络核心组成。
 
+## 项目亮点
+
+ProxyNetworker 的目标不是简单复制一个端口转发工具，而是把端口穿透、加密虚拟局域网、智能直连/中继和可视化管理整合到一套可自托管方案中。
+
+- **一个服务端覆盖两类场景**：同时提供 TCP/UDP 端口穿透和虚拟局域网，不需要分别部署端口转发工具、VPN 和独立管理面板。
+- **优先直连，失败自动中继**：UDP 节点交换局域网和公网候选地址，通过加密探针选择可用的低延迟直连路径；无法直连时自动回退到服务端中继。
+- **UDP/QUIC 双协议**：UDP 作为默认协议，兼顾直连和低延迟；QUIC 为需要可靠流式中继的场景提供备选。KCP 经过实际测试后因尾部延迟过高被移除。
+- **跨平台 Native AOT 客户端**：已实测 Windows 11 x64、Ubuntu 24.04 x64 和 Debian 13 Raspberry Pi arm64，发布后不需要目标机器预装 .NET。
+- **完整的数据面安全**：Token 按资源发放，虚拟网络使用临时 256 位会话密钥，UDP 数据帧通过 AES-GCM 加密和完整性校验。
+- **面向运维的管理能力**：支持用户与资源配额、Token 管理、网络启停、节点封禁、在线设备、连接历史和协议选择。
+- **部署门槛低**：服务端使用 SQLite，无外部数据库依赖；支持 Docker Compose；Linux 客户端提供基于 `nohup` 的后台启动脚本。
+- **可验证的工程选择**：协议与平台结论来自实际构建、跨节点测试和延迟数据，而不是只依据理论特性。
+
 ## 主要功能
 
 - 端口穿透：将 TCP 或 UDP 内网服务映射到服务端分配的稳定公网端口。
@@ -15,12 +28,26 @@ ProxyNetworker 是一个面向自托管场景的网络工具，提供公网端�
 
 ## 平台支持
 
-| 组件 | 平台 | 说明 |
-| --- | --- | --- |
-| Server | Linux x64 | 推荐使用 Docker Compose 或 systemd 部署 |
-| Client | Windows x64 | 创建 TUN 设备时需要管理员权限 |
-| Client | Linux x64 | 虚拟网络模式需要 root 或 `CAP_NET_ADMIN` |
-| Client | Linux ARM64 | 虚拟网络模式需要 root 或 `CAP_NET_ADMIN` |
+### 已实测平台
+
+| 组件 | 操作系统 | 架构 | 验证范围 |
+| --- | --- | --- | --- |
+| Server | Windows 11 专业版 | x64 | 本地启动、管理 API、SQLite 数据库迁移 |
+| Server | Ubuntu 24.04.5 LTS | x64 | 管理面板、端口分配、UDP/QUIC 虚拟网络和中继服务 |
+| Server | Ubuntu 24.04.5 LTS + Docker | x64 | Docker Compose 构建、健康检查和线上部署 |
+| Client | Windows 11 专业版 | x64 | 端口穿透、虚拟网络、TUN 设备和多节点互通 |
+| Client | Ubuntu 24.04.5 LTS | x64 | 端口穿透、虚拟网络、UDP 直连与中继回退 |
+| Client | Debian GNU/Linux 13（Raspberry Pi） | arm64 | 虚拟网络、TUN 设备和跨平台节点互通 |
+
+“已实测”表示上述环境和架构中已经完成实际运行验证。其他 Linux 发行版只要满足 .NET 10、TUN 和 `iproute2` 等依赖，通常也可以运行，但尚未逐一列入验证矩阵。
+
+### 运行要求
+
+| 组件 | 要求 |
+| --- | --- |
+| Server | .NET 10；Linux 推荐 Docker Compose 或 systemd 部署 |
+| Windows Client | 创建 TUN 设备时需要管理员权限 |
+| Linux Client | 虚拟网络模式需要 `/dev/net/tun`、`iproute2`、root 或 `CAP_NET_ADMIN` |
 
 服务端基于 .NET 10。客户端可发布为自包含程序，目标机器不需要预装 .NET 运行时。
 
