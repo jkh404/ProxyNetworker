@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using ProxyNetworker.Core.Platforms.Linux;
+using ProxyNetworker.Core.Platforms.MacOS;
 using ProxyNetworker.Core.Platforms.Windows;
 
 namespace ProxyNetworker.Core;
@@ -25,6 +26,11 @@ public static class TunDeviceFactory
             return new LinuxTunDevice(options, logger);
         }
 
-        throw new PlatformNotSupportedException("ProxyNetworker.Core currently supports TUN devices on Windows and Linux.");
+        if (OperatingSystem.IsMacOS())
+        {
+            return new MacOsTunDevice(options, logger);
+        }
+
+        throw new PlatformNotSupportedException("ProxyNetworker.Core supports TUN devices on Windows, Linux and macOS.");
     }
 }

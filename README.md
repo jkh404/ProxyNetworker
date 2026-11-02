@@ -196,6 +196,7 @@ dotnet script ".\通用dotnet编译发布脚本.csx" -- ".\ProxyNetworker.Client
 
 ## 文档
 
+- [客户端路线图：macOS、Avalonia 桌面端与 Android 评估](docs/CLIENT_ROADMAP.md)
 - [客户端使用与 AOT 发布](ProxyNetworker.Client/README.md)
 - [服务端 Docker 部署](ProxyNetworker.Server/README.Docker.md)
 - [服务端配置说明](ProxyNetworker.Server/README.Configuration.md)

@@ -3,7 +3,7 @@
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net10.0</TargetFramework>
-    <RuntimeIdentifiers>win-x64;linux-x64;linux-arm64</RuntimeIdentifiers>
+    <RuntimeIdentifiers>win-x64;linux-x64;linux-arm64;osx-arm64;osx-x64</RuntimeIdentifiers>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <IsAotCompatible>true</IsAotCompatible>
@@ -22,6 +22,13 @@
 
   <ItemGroup Condition="'$(RuntimeIdentifier)' == 'linux-x64' Or '$(RuntimeIdentifier)' == 'linux-arm64' Or '$(RuntimeIdentifier)' == 'linux-arm' Or '$(RuntimeIdentifier)' == 'linux-musl-x64' Or '$(RuntimeIdentifier)' == 'linux-musl-arm64' Or '$(RuntimeIdentifier)' == 'linux-musl-arm'">
     <None Update="run.sh">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </None>
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(RuntimeIdentifier)' == 'osx-arm64' Or '$(RuntimeIdentifier)' == 'osx-x64'">
+    <None Update="run-macos.sh" TargetPath="run.sh">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </None>

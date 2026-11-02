@@ -21,7 +21,10 @@ finally
 
 static Serilog.ILogger CreateLogger()
 {
-    var logPath = Path.Combine(AppContext.BaseDirectory, "logs", "client-.log");
+    var logPath = OperatingSystem.IsMacOS()
+        ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "ProxyNetworker", "logs", "client-.log")
+        : Path.Combine(AppContext.BaseDirectory, "logs", "client-.log");
     var logDirectory = Path.GetDirectoryName(logPath);
     if (!string.IsNullOrWhiteSpace(logDirectory))
     {

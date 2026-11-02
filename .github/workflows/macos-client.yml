@@ -1,0 +1,155 @@
+name: macOS client preview
+
+on:
+  push:
+    branches:
+      - master
+      - 'codex/mac-client-*'
+    paths:
+      - 'ProxyNetworker.Core/**'
+      - 'ProxyNetworker.Core.Tests/**'
+      - 'ProxyNetworker.Client/**'
+      - 'tools/ProxyNetworker.MacSmoke/**'
+      - '.github/workflows/macos-client.yml'
+  pull_request:
+    paths:
+      - 'ProxyNetworker.Core/**'
+      - 'ProxyNetworker.Core.Tests/**'
+      - 'ProxyNetworker.Client/**'
+      - 'tools/ProxyNetworker.MacSmoke/**'
+      - '.github/workflows/macos-client.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-client-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_VERSION: '10.0.x'
+  DOTNET_NOLOGO: 'true'
+  DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+
+jobs:
+  regression:
+    name: Regression ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, windows-latest]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+      - name: Build solution
+        run: dotnet build ProxyNetworker.slnx -c Release
+      - name: Regression tests
+        run: dotnet test ProxyNetworker.Core.Tests/ProxyNetworker.Core.Tests.csproj -c Release --no-build --logger trx --results-directory artifacts/test-results
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: regression-${{ matrix.runner }}
+          path: artifacts/test-results
+          retention-days: 14
+
+  macos:
+    name: Native ${{ matrix.rid }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rid: osx-arm64
+            runner: macos-15
+            machine: arm64
+          - rid: osx-x64
+            runner: macos-15-intel
+            machine: x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      RID: ${{ matrix.rid }}
+      EXPECTED_MACHINE: ${{ matrix.machine }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+      - name: Record actual native environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "$EXPECTED_MACHINE"
+          mkdir -p artifacts/environment
+          sw_vers | tee artifacts/environment/os.txt
+          uname -m | tee artifacts/environment/architecture.txt
+          xcrun clang --version | tee artifacts/environment/clang.txt
+          dotnet --info | tee artifacts/environment/dotnet.txt
+          printf '%s\n' "$GITHUB_SHA" > artifacts/environment/commit.txt
+      - name: Build and test managed code
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet build ProxyNetworker.slnx -c Release
+          dotnet test ProxyNetworker.Core.Tests/ProxyNetworker.Core.Tests.csproj \
+            -c Release --no-build --logger trx --results-directory artifacts/test-results
+      - name: Publish native client and isolated smoke tool
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet publish ProxyNetworker.Client/ProxyNetworker.Client.csproj \
+            -c Release -r "$RID" --self-contained true -p:PublishAot=true \
+            -p:ContinuousIntegrationBuild=true -p:DebugType=None -p:DebugSymbols=false \
+            -o dist/client
+          dotnet publish tools/ProxyNetworker.MacSmoke/ProxyNetworker.MacSmoke.csproj \
+            -c Release -r "$RID" --self-contained true -p:PublishAot=true \
+            -p:DebugType=None -p:DebugSymbols=false -o dist/smoke
+      - name: Check native dependencies and local signatures
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f dist/client/libproxynetworker-utun.dylib
+          test -f dist/smoke/libproxynetworker-utun.dylib
+          test -f dist/client/run.sh
+          bash -n dist/client/run.sh
+          for file in dist/client/ProxyNetworker.Client dist/client/libproxynetworker-utun.dylib \
+                      dist/smoke/ProxyNetworker.MacSmoke dist/smoke/libproxynetworker-utun.dylib; do
+            codesign --force --sign - --timestamp=none "$file"
+            codesign --verify --strict "$file"
+            file "$file"
+          done
+          dist/client/ProxyNetworker.Client crypto self-test | tee artifacts/crypto-self-test.txt
+      - name: Isolated utun local-stack smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo dist/smoke/ProxyNetworker.MacSmoke "$PWD/dist/client/ProxyNetworker.Client" \
+            > artifacts/utun-smoke.json 2> artifacts/utun-smoke.log
+          cat artifacts/utun-smoke.json
+          echo "CI local-stack smoke only; physical-Mac interoperability/performance/sleep/UI acceptance is deferred." \
+            >> "$GITHUB_STEP_SUMMARY"
+      - name: Package development preview
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage="dist/package"
+          mkdir -p "$stage" artifacts/packages
+          cp dist/client/ProxyNetworker.Client dist/client/libproxynetworker-utun.dylib \
+             dist/client/appsettings.json dist/client/run.sh "$stage/"
+          cp ProxyNetworker.Client/README.macOS.md "$stage/README.md"
+          cp LICENSE "$stage/LICENSE"
+          chmod 0755 "$stage/ProxyNetworker.Client" "$stage/run.sh"
+          python3 -c 'import json,os,pathlib; pathlib.Path("dist/package/PREVIEW.json").write_text(json.dumps({"rid":os.environ["RID"],"commit":os.environ["GITHUB_SHA"],"physicalMacValidation":False,"developerIdSigned":False,"distribution":"CI development preview; ad-hoc signed, not notarized"},indent=2))'
+          archive="ProxyNetworker.Client_${RID}_preview.tar.gz"
+          tar -czf "artifacts/packages/$archive" -C "$stage" .
+          (cd artifacts/packages && shasum -a 256 "$archive" > SHA256SUMS.txt)
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: macos-evidence-${{ matrix.rid }}
+          path: artifacts
+          retention-days: 14
