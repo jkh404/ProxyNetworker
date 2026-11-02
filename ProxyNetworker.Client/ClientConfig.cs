@@ -88,6 +88,7 @@ internal sealed class ProxyNetworkerClientConfig
         writer.WriteBoolean("enabled", false);
         writer.WriteString("name", "pn-client");
         writer.WriteString("token", "vnet_replace_this_token");
+        writer.WriteBoolean("stableDirectPathSelection", true);
         writer.WriteEndObject();
     }
 
@@ -172,4 +173,6 @@ internal sealed class DirectVirtualNetworkClientConfig
     public byte[] AuthenticationKey { get; set; } = Array.Empty<byte>();
 
     public bool RelayOnly { get; set; }
+
+    public bool StableDirectPathSelection { get; set; } = true;
 }

@@ -488,7 +488,9 @@ internal static class ProxyNetworkerClientApp
                             {
                                 disposables.Add(instanceLock);
                                 Console.WriteLine($"Starting Virtual Network '{virtualNetwork.Name}' by token from {server}.");
-                                tasks.Add(RunVirtualNetworkTokenRuntimeAsync(server, virtualNetwork.Token, virtualNetwork.Name, virtualNetwork.RelayOnly, shutdown.Token));
+                                tasks.Add(RunVirtualNetworkTokenRuntimeAsync(
+                                    server, virtualNetwork.Token, virtualNetwork.Name, virtualNetwork.RelayOnly,
+                                    shutdown.Token, virtualNetwork.StableDirectPathSelection));
                             }
                         }
                     }
@@ -599,8 +601,16 @@ internal static class ProxyNetworkerClientApp
                 NodeName = string.IsNullOrWhiteSpace(config.NodeDisplayName) ? config.Name : config.NodeDisplayName,
                 AuthenticationKey = config.AuthenticationKey,
                 EncryptionEnabled = config.EncryptionEnabled,
-                EnableDirectPaths = !config.RelayOnly
+                EnableDirectPaths = !config.RelayOnly,
+                EnableStableDirectPathSelection = config.StableDirectPathSelection,
+                AllowedDirectCandidateAddresses = ParseDirectAddressAllowlist(
+                    Environment.GetEnvironmentVariable("PN_DIRECT_ADDRESS_ALLOWLIST"))
             };
+            if (options.AllowedDirectCandidateAddresses.Count != 0)
+            {
+                Log.Information("Virtual Network direct candidate allowlist: {Addresses}",
+                    string.Join(", ", options.AllowedDirectCandidateAddresses));
+            }
             IDisposable tunnel = VirtualNetworkTransportProtocols.UsesReliableStream(config.TransportProtocol)
                 ? new VirtualNetworkStreamTunnel(tunDevice, options, config.TransportProtocol, WriteLog)
                 : new VirtualNetworkTunnel(tunDevice, options, WriteLog);
@@ -623,12 +633,35 @@ internal static class ProxyNetworkerClientApp
         }
     }
 
+    private static IPAddress[] ParseDirectAddressAllowlist(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return [];
+        }
+
+        var addresses = value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (addresses.Length == 0)
+        {
+            throw new ArgumentException("PN_DIRECT_ADDRESS_ALLOWLIST must contain comma-separated IPv4 addresses.");
+        }
+        return addresses.Select(address =>
+        {
+            if (!IPAddress.TryParse(address, out var parsed) || parsed.AddressFamily != AddressFamily.InterNetwork)
+            {
+                throw new ArgumentException("PN_DIRECT_ADDRESS_ALLOWLIST must contain comma-separated IPv4 addresses.");
+            }
+            return parsed;
+        }).Distinct().ToArray();
+    }
+
     private static async Task RunVirtualNetworkTokenRuntimeAsync(
         string server,
         string token,
         string? name,
         bool relayOnly,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool stableDirectPathSelection = true)
     {
         using var api = new ManagementApiClient(server);
         var retryDelay = TimeSpan.FromSeconds(2);
@@ -643,7 +676,8 @@ internal static class ProxyNetworkerClientApp
                     remoteConfig,
                     name,
                     relayOnly,
-                    cancellationToken).ConfigureAwait(false);
+                    cancellationToken,
+                    stableDirectPathSelection).ConfigureAwait(false);
                 retryDelay = TimeSpan.FromSeconds(2);
 
                 while (!cancellationToken.IsCancellationRequested)
@@ -686,7 +720,8 @@ internal static class ProxyNetworkerClientApp
         VirtualNetworkClientConfigResponse remoteConfig,
         string? name,
         bool relayOnly,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool stableDirectPathSelection = true)
     {
         var displayName = string.IsNullOrWhiteSpace(name)
             ? CreateClientTunName(remoteConfig.NetworkId)
@@ -734,7 +769,8 @@ internal static class ProxyNetworkerClientApp
             AuthenticationKey = authenticationKey,
             TransportProtocol = remoteConfig.TransportProtocol,
             EncryptionEnabled = encryptionEnabled,
-            RelayOnly = relayOnly
+            RelayOnly = relayOnly,
+            StableDirectPathSelection = stableDirectPathSelection
         }, cancellationToken).ConfigureAwait(false);
     }
 

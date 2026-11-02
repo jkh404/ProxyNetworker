@@ -1,0 +1,116 @@
+struct pn_message {
+    unsigned long name;
+    unsigned int name_length;
+    unsigned int pad0;
+    unsigned long vectors;
+    unsigned long vector_count;
+    unsigned long control;
+    unsigned long control_length;
+    int flags;
+    unsigned int pad1;
+    unsigned int length;
+    unsigned int pad2;
+};
+
+struct pn_control {
+    unsigned long length;
+    int level;
+    int type;
+    int segment_size;
+};
+
+BEGIN
+{
+    printf("UDP offload trace: pid=%d tun_fd=%d duration=90s\n", $1, $2);
+}
+
+tracepoint:syscalls:sys_enter_sendmmsg
+/pid == $1/
+{
+    @tx_pointer[tid] = (uint64)args->mmsg;
+}
+
+tracepoint:syscalls:sys_exit_sendmmsg
+/pid == $1/
+{
+    @send_calls = count();
+    if (args->ret > 0) {
+        @send_positive_calls = count();
+        @send_groups = sum(args->ret);
+        @send_batch = hist(args->ret);
+        $i = (uint64)0;
+        while ($i < args->ret && $i < 32) {
+            $m = (struct pn_message *)uptr(@tx_pointer[tid] + $i * 64);
+            @send_frames = sum($m->vector_count);
+            @send_payload_bytes = sum($m->length);
+            if ($m->control_length >= 18) {
+                $c = (struct pn_control *)uptr($m->control);
+                if ($c->level == 17 && $c->type == 103) {
+                    @gso_groups = count();
+                    @gso_frames = sum($m->vector_count);
+                    @gso_frames_per_group = hist($m->vector_count);
+                }
+            }
+            $i++;
+        }
+    } else if (args->ret < 0) {
+        @send_errors[-args->ret] = count();
+    }
+    delete(@tx_pointer[tid]);
+}
+
+tracepoint:syscalls:sys_enter_recvmmsg
+/pid == $1/
+{
+    @rx_pointer[tid] = (uint64)args->mmsg;
+}
+
+tracepoint:syscalls:sys_exit_recvmmsg
+/pid == $1/
+{
+    if (args->ret > 0) {
+        @receive_positive_calls = count();
+        @receive_messages = sum(args->ret);
+        @receive_batch = hist(args->ret);
+        $i = (uint64)0;
+        while ($i < args->ret && $i < 32) {
+            $m = (struct pn_message *)uptr(@rx_pointer[tid] + $i * 64);
+            $frames = (uint64)1;
+            if ($m->control_length >= 20) {
+                $c = (struct pn_control *)uptr($m->control);
+                if ($c->level == 17 && $c->type == 104 &&
+                    $c->segment_size > 0 && $m->length > 0) {
+                    $frames = 1 + ($m->length - 1) / (uint64)$c->segment_size;
+                    @gro_messages = count();
+                    @gro_frames = sum($frames);
+                    @gro_frames_per_message = hist($frames);
+                }
+            }
+            @receive_frames = sum($frames);
+            $i++;
+        }
+    }
+    delete(@rx_pointer[tid]);
+}
+
+tracepoint:syscalls:sys_enter_writev
+/pid == $1 && args->fd == $2/
+{
+    @tun_write[tid] = 1;
+}
+
+tracepoint:syscalls:sys_exit_writev
+/pid == $1 && @tun_write[tid]/
+{
+    if (args->ret > 0) {
+        @tun_writes = count();
+        @tun_write_bytes = sum(args->ret);
+        @tun_write_sizes = hist(args->ret);
+    }
+    delete(@tun_write[tid]);
+}
+
+interval:s:90
+{
+    exit();
+}

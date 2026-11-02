@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Net;
 using System.Net.Sockets;
 using ProxyNetworker.Core.Platforms.Linux;
@@ -299,8 +300,7 @@ public sealed class VirtualNetworkRelay : IVirtualNetworkRelay
                     }
 
                     if (!VirtualNetworkFrame.TryParse(
-                        received.Buffer,
-                        received.Length,
+                        received.Memory,
                         _options.AuthenticationKey,
                         _options.EncryptionEnabled,
                         out var frame))
@@ -488,7 +488,7 @@ public sealed class VirtualNetworkRelay : IVirtualNetworkRelay
                 break;
 
             case VirtualNetworkFrameType.MeshPacket:
-                if (!VirtualNetworkMeshPacket.TryParse(frame.Payload.Span, out var meshPacket))
+                if (!VirtualNetworkMeshPacket.TryParse(frame.Payload, out var meshPacket))
                 {
                     return;
                 }
@@ -573,8 +573,63 @@ public sealed class VirtualNetworkRelay : IVirtualNetworkRelay
 
     private async Task SendPacketFrameAsync(ReadOnlyMemory<byte> packet, IPEndPoint remoteEndPoint, CancellationToken cancellationToken)
     {
-        var frame = VirtualNetworkFrame.Create(VirtualNetworkFrameType.Packet, _options.NodeAddress, packet.Span, _options.AuthenticationKey, _options.EncryptionEnabled);
-        await SendFrameAsync(frame, remoteEndPoint, cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        var frameLength = VirtualNetworkFrame.GetFrameLength(packet.Length);
+        var frame = ArrayPool<byte>.Shared.Rent(frameLength);
+        try
+        {
+            VirtualNetworkFrame.CreateInto(
+                VirtualNetworkFrameType.Packet,
+                _options.NodeAddress,
+                packet.Span,
+                _options.AuthenticationKey,
+                _options.EncryptionEnabled,
+                frame.AsSpan(0, frameLength));
+        }
+        catch
+        {
+            ArrayPool<byte>.Shared.Return(frame);
+            throw;
+        }
+
+        await SendOwnedFrameAsync(frame, frameLength, remoteEndPoint, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task SendOwnedFrameAsync(byte[] frame, int frameLength, IPEndPoint remoteEndPoint, CancellationToken cancellationToken)
+    {
+        var batchSocket = _linuxUdpBatchSocket;
+        if (batchSocket is not null)
+        {
+            if (!batchSocket.EnqueueOwned(frame, frameLength, remoteEndPoint))
+            {
+                ArrayPool<byte>.Shared.Return(frame);
+            }
+
+            return;
+        }
+
+        try
+        {
+            var udpClient = _udpClient;
+            if (udpClient is null)
+            {
+                return;
+            }
+
+            await _sendLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                await udpClient.SendAsync(frame, frameLength, remoteEndPoint).ConfigureAwait(false);
+            }
+            finally
+            {
+                _sendLock.Release();
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(frame);
+        }
     }
 
     private async Task SendFrameAsync(byte[] frame, IPEndPoint remoteEndPoint, CancellationToken cancellationToken)

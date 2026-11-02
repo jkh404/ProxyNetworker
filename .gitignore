@@ -369,3 +369,19 @@ ProxyNetworker.Server/*.db-wal
 ProxyNetworker.Server/*.db-journal
 ProxyNetworker.Server/data-protection-keys/
 /.temp
+
+# Local deployment configuration and release staging
+.env
+.env.*
+!.env.example
+**/appsettings.Local.json
+**/appsettings.Production.json
+**/proxynetworker.client.json
+**/original-appsettings.json
+**/original-proxynetworker.client.json
+/dist/
+/.build/
+
+# Public version notes, not generated release binaries
+!/docs/releases/
+!/docs/releases/*.md

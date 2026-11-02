@@ -88,4 +88,28 @@ public sealed class VirtualNetworkAeadTests
         Assert.True(VirtualNetworkAead.TryDecryptInPlace(Key, Nonce, payload, tag, AssociatedData));
         Assert.Equal(expectedPlaintext, payload);
     }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void InPlaceEncryptMatchesStandardVector(bool managed)
+    {
+        var payload = "ProxyNetworker standard GCM vector"u8.ToArray();
+        var expectedCiphertext = Convert.FromHexString(
+            "1770B963BCABA76FFA2EE5E0D49B581EF7B7E95091093B5C7F24A8A56B0C63C66E62");
+        var expectedTag = Convert.FromHexString("1501BC0200F6AA09590E9753E14B5A09");
+        var tag = new byte[VirtualNetworkAead.TagSize];
+
+        if (managed)
+        {
+            VirtualNetworkAead.EncryptManaged(Key, Nonce, payload, payload, tag, AssociatedData);
+        }
+        else
+        {
+            VirtualNetworkAead.Encrypt(Key, Nonce, payload, payload, tag, AssociatedData);
+        }
+
+        Assert.Equal(expectedCiphertext, payload);
+        Assert.Equal(expectedTag, tag);
+    }
 }

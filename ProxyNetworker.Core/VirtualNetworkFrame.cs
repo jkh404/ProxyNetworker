@@ -38,6 +38,12 @@ internal readonly struct VirtualNetworkFrame
     [ThreadStatic]
     private static byte[]? _hmacKey;
 
+    [ThreadStatic]
+    private static byte[]? _noncePrefix;
+
+    [ThreadStatic]
+    private static uint _nonceCounter;
+
     public VirtualNetworkFrame(VirtualNetworkFrameType type, IPAddress virtualAddress, ReadOnlyMemory<byte> payload)
     {
         Type = type;
@@ -68,6 +74,16 @@ internal readonly struct VirtualNetworkFrame
         return checked(HeaderSize + payloadLength);
     }
 
+    internal static Span<byte> GetPayloadBuffer(Span<byte> frame, int payloadLength, bool encryptionEnabled)
+    {
+        if (frame.Length != GetFrameLength(payloadLength))
+        {
+            throw new ArgumentException("Frame buffer has an unexpected length.", nameof(frame));
+        }
+
+        return frame.Slice(encryptionEnabled ? HeaderSize : AuthenticatedHeaderSize, payloadLength);
+    }
+
     internal static void CreateInto(
         VirtualNetworkFrameType type,
         IPAddress virtualAddress,
@@ -81,8 +97,7 @@ internal readonly struct VirtualNetworkFrame
             throw new ArgumentException("Virtual Network authentication key must be 32 bytes.", nameof(authenticationKey));
         }
 
-        var addressBytes = virtualAddress.GetAddressBytes();
-        if (addressBytes.Length != 4)
+        if (!virtualAddress.TryWriteBytes(frame.Slice(8, 4), out var addressBytesWritten) || addressBytesWritten != 4)
         {
             throw new PlatformNotSupportedException("Virtual Network frames currently support IPv4 only.");
         }
@@ -96,10 +111,9 @@ internal readonly struct VirtualNetworkFrame
         frame[4] = encryptionEnabled ? EncryptedVersion : AuthenticatedVersion;
         frame[5] = (byte)type;
         BinaryPrimitives.WriteUInt16BigEndian(frame.Slice(6, 2), 0);
-        addressBytes.CopyTo(frame.Slice(8, 4));
         BinaryPrimitives.WriteUInt32BigEndian(frame.Slice(12, 4), checked((uint)payload.Length));
         BinaryPrimitives.WriteInt64BigEndian(frame.Slice(TimestampOffset, 8), DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
-        RandomNumberGenerator.Fill(frame.Slice(NonceOffset, NonceSize));
+        WriteNonce(frame.Slice(NonceOffset, NonceSize));
 
         if (encryptionEnabled)
         {
@@ -148,18 +162,34 @@ internal readonly struct VirtualNetworkFrame
     public static bool TryParse(byte[] datagram, int datagramLength, ReadOnlySpan<byte> authenticationKey, bool encryptionEnabled, out VirtualNetworkFrame frame)
     {
         frame = default;
-        if (authenticationKey.Length != 32 || datagramLength < HeaderSize || datagramLength > datagram.Length)
+        if (datagramLength < 0 || datagramLength > datagram.Length)
         {
             return false;
         }
 
+        return TryParse(datagram.AsMemory(0, datagramLength), authenticationKey, encryptionEnabled, out frame);
+    }
+
+    internal static bool TryParse(
+        Memory<byte> datagram,
+        ReadOnlySpan<byte> authenticationKey,
+        bool encryptionEnabled,
+        out VirtualNetworkFrame frame)
+    {
+        frame = default;
+        if (authenticationKey.Length != 32 || datagram.Length < HeaderSize)
+        {
+            return false;
+        }
+
+        var span = datagram.Span;
         var expectedVersion = encryptionEnabled ? EncryptedVersion : AuthenticatedVersion;
-        if (BinaryPrimitives.ReadUInt32BigEndian(datagram.AsSpan(0, 4)) != Magic || datagram[4] != expectedVersion)
+        if (BinaryPrimitives.ReadUInt32BigEndian(span[..4]) != Magic || span[4] != expectedVersion)
         {
             return false;
         }
 
-        var type = (VirtualNetworkFrameType)datagram[5];
+        var type = (VirtualNetworkFrameType)span[5];
         if (type is not (VirtualNetworkFrameType.Hello or
             VirtualNetworkFrameType.Packet or
             VirtualNetworkFrameType.Heartbeat or
@@ -174,52 +204,50 @@ internal readonly struct VirtualNetworkFrame
             return false;
         }
 
-        var payloadLength = BinaryPrimitives.ReadUInt32BigEndian(datagram.AsSpan(12, 4));
-        if (payloadLength != datagramLength - HeaderSize)
+        var payloadLength = BinaryPrimitives.ReadUInt32BigEndian(span.Slice(12, 4));
+        if (payloadLength != datagram.Length - HeaderSize)
         {
             return false;
         }
 
-        var timestamp = BinaryPrimitives.ReadInt64BigEndian(datagram.AsSpan(TimestampOffset, 8));
+        var timestamp = BinaryPrimitives.ReadInt64BigEndian(span.Slice(TimestampOffset, 8));
         var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         if (timestamp < now - MaxClockSkewMilliseconds || timestamp > now + MaxClockSkewMilliseconds)
         {
             return false;
         }
 
-        var addressBytes = new byte[4];
-        Buffer.BlockCopy(datagram, 8, addressBytes, 0, addressBytes.Length);
         ReadOnlyMemory<byte> plaintext;
         if (encryptionEnabled)
         {
-            var decrypted = datagram.AsSpan(HeaderSize, checked((int)payloadLength));
+            var decrypted = span.Slice(HeaderSize, checked((int)payloadLength));
             if (!VirtualNetworkAead.TryDecryptInPlace(
                 authenticationKey,
-                datagram.AsSpan(NonceOffset, NonceSize),
+                span.Slice(NonceOffset, NonceSize),
                 decrypted,
-                datagram.AsSpan(TagOffset, TagSize),
-                datagram.AsSpan(0, TagOffset)))
+                span.Slice(TagOffset, TagSize),
+                span[..TagOffset]))
             {
                 return false;
             }
 
-            plaintext = new ReadOnlyMemory<byte>(datagram, HeaderSize, decrypted.Length);
+            plaintext = datagram.Slice(HeaderSize, decrypted.Length);
         }
         else
         {
             var authenticatedLength = AuthenticatedHeaderSize + checked((int)payloadLength);
-            var receivedTag = datagram.AsSpan(authenticatedLength, TagSize);
+            var receivedTag = span.Slice(authenticatedLength, TagSize);
             Span<byte> expectedHash = stackalloc byte[32];
-            GetHmac(authenticationKey).TryComputeHash(datagram.AsSpan(0, authenticatedLength), expectedHash, out _);
+            GetHmac(authenticationKey).TryComputeHash(span[..authenticatedLength], expectedHash, out _);
             if (!CryptographicOperations.FixedTimeEquals(receivedTag, expectedHash[..TagSize]))
             {
                 return false;
             }
 
-            plaintext = new ReadOnlyMemory<byte>(datagram, AuthenticatedHeaderSize, checked((int)payloadLength));
+            plaintext = datagram.Slice(AuthenticatedHeaderSize, checked((int)payloadLength));
         }
 
-        frame = new VirtualNetworkFrame(type, new IPAddress(addressBytes), plaintext);
+        frame = new VirtualNetworkFrame(type, new IPAddress(span.Slice(8, 4)), plaintext);
         return true;
     }
 
@@ -234,5 +262,24 @@ internal readonly struct VirtualNetworkFrame
         _hmacKey = key.ToArray();
         _hmac = new HMACSHA256(_hmacKey);
         return _hmac;
+    }
+
+    private static void WriteNonce(Span<byte> nonce)
+    {
+        if (_noncePrefix is null)
+        {
+            _noncePrefix = RandomNumberGenerator.GetBytes(8);
+            _nonceCounter = 0;
+        }
+
+        var counter = unchecked(++_nonceCounter);
+        if (counter == 0)
+        {
+            RandomNumberGenerator.Fill(_noncePrefix);
+            counter = ++_nonceCounter;
+        }
+
+        _noncePrefix.CopyTo(nonce[..8]);
+        BinaryPrimitives.WriteUInt32BigEndian(nonce[8..12], counter);
     }
 }

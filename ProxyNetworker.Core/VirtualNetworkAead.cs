@@ -208,7 +208,7 @@ internal static class VirtualNetworkAead
 
         try
         {
-            foreach (var length in new[] { 0, 1, 16, 17, 1400, 1500 })
+            foreach (var length in new[] { 0, 1, 16, 17, 1400, 1408, 1500 })
             {
                 var nonce = Enumerable.Range(0, NonceSize)
                     .Select(index => (byte)(index * 17 + length))
@@ -221,13 +221,20 @@ internal static class VirtualNetworkAead
                 var managedCiphertext = new byte[length];
                 var managedTag = new byte[TagSize];
                 var decrypted = new byte[length];
+                var inPlace = plaintext.ToArray();
+                var inPlaceTag = new byte[TagSize];
 
                 EncryptSystem(key, nonce, plaintext, systemCiphertext, systemTag, associatedData);
                 EncryptManaged(key, nonce, plaintext, managedCiphertext, managedTag, associatedData);
+                EncryptSystem(key, nonce, inPlace, inPlace, inPlaceTag, associatedData);
                 if (!systemCiphertext.AsSpan().SequenceEqual(managedCiphertext) ||
                     !systemTag.AsSpan().SequenceEqual(managedTag) ||
+                    !inPlace.AsSpan().SequenceEqual(managedCiphertext) ||
+                    !inPlaceTag.AsSpan().SequenceEqual(managedTag) ||
                     !TryDecryptSystem(key, nonce, managedCiphertext, managedTag, decrypted, associatedData) ||
-                    !decrypted.AsSpan().SequenceEqual(plaintext))
+                    !decrypted.AsSpan().SequenceEqual(plaintext) ||
+                    !TryDecryptSystem(key, nonce, inPlace, inPlaceTag, inPlace, associatedData) ||
+                    !inPlace.AsSpan().SequenceEqual(plaintext))
                 {
                     return false;
                 }

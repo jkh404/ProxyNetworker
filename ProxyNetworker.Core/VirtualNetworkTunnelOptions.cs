@@ -20,9 +20,21 @@ public class VirtualNetworkTunnelOptions
 
     public bool EnableDirectPaths { get; set; } = true;
 
+    /// <summary>
+    /// Gets or sets whether healthy private direct candidates receive a bounded preference
+    /// and small score changes retain the current direct path. Enabled by default.
+    /// </summary>
+    public bool EnableStableDirectPathSelection { get; set; } = true;
+
     public IReadOnlyCollection<IPEndPoint> AdditionalCandidateEndPoints { get; set; } = Array.Empty<IPEndPoint>();
 
     public IReadOnlyCollection<IPAddress> DirectPathExcludedAddresses { get; set; } = Array.Empty<IPAddress>();
+
+    /// <summary>
+    /// Gets or sets the permitted local and remote direct candidate IPv4 addresses.
+    /// An empty collection permits all candidate addresses and does not restrict the relay endpoint.
+    /// </summary>
+    public IReadOnlyCollection<IPAddress> AllowedDirectCandidateAddresses { get; set; } = Array.Empty<IPAddress>();
 
     public bool IncludeLocalInterfaceCandidates { get; set; } = true;
 
@@ -90,6 +102,14 @@ public class VirtualNetworkTunnelOptions
             if (address.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork)
             {
                 throw new ArgumentException("Direct path exclusions must be IPv4 addresses.", nameof(DirectPathExcludedAddresses));
+            }
+        }
+
+        foreach (var address in AllowedDirectCandidateAddresses)
+        {
+            if (address.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork)
+            {
+                throw new ArgumentException("Direct candidate allowlist entries must be IPv4 addresses.", nameof(AllowedDirectCandidateAddresses));
             }
         }
     }

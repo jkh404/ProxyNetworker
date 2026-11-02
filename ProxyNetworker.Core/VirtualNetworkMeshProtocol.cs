@@ -227,66 +227,87 @@ internal readonly struct VirtualNetworkMeshPacket
 
     public ReadOnlyMemory<byte> Payload { get; }
 
+    public bool CanForward => HopCount + 1 < HopLimit;
+
+    internal static int GetPayloadLength(int packetLength) => checked(HeaderSize + packetLength);
+
     public static byte[] Create(IPAddress destination, ReadOnlySpan<byte> packet, byte hopLimit = DefaultHopLimit)
     {
-        var addressBytes = destination.GetAddressBytes();
-        if (addressBytes.Length != 4)
-        {
-            throw new PlatformNotSupportedException("Virtual Network mesh packets currently support IPv4 only.");
-        }
+        var payload = new byte[GetPayloadLength(packet.Length)];
+        CreateInto(destination, packet, payload, hopLimit: hopLimit);
+        return payload;
+    }
 
+    internal static void CreateInto(
+        IPAddress destination,
+        ReadOnlySpan<byte> packet,
+        Span<byte> payload,
+        byte hopCount = 0,
+        byte hopLimit = DefaultHopLimit)
+    {
         if (hopLimit is 0 or > MaximumHopLimit)
         {
             throw new ArgumentOutOfRangeException(nameof(hopLimit));
         }
 
-        var payload = new byte[HeaderSize + packet.Length];
+        if (hopCount >= hopLimit)
+        {
+            throw new ArgumentOutOfRangeException(nameof(hopCount));
+        }
+
+        if (payload.Length != GetPayloadLength(packet.Length))
+        {
+            throw new ArgumentException("Mesh payload buffer has an unexpected length.", nameof(payload));
+        }
+
+        if (!destination.TryWriteBytes(payload.Slice(4, 4), out var written) || written != 4)
+        {
+            throw new PlatformNotSupportedException("Virtual Network mesh packets currently support IPv4 only.");
+        }
+
         payload[0] = CurrentVersion;
-        payload[1] = 0;
+        payload[1] = hopCount;
         payload[2] = hopLimit;
-        addressBytes.CopyTo(payload.AsSpan(4, 4));
-        packet.CopyTo(payload.AsSpan(HeaderSize));
-        return payload;
+        payload[3] = 0;
+        packet.CopyTo(payload[HeaderSize..]);
     }
 
-    public static bool TryParse(ReadOnlySpan<byte> payload, out VirtualNetworkMeshPacket packet)
+    public static bool TryParse(ReadOnlyMemory<byte> payload, out VirtualNetworkMeshPacket packet)
     {
         packet = default;
-        if (payload.Length <= HeaderSize || payload[0] != CurrentVersion)
+        var span = payload.Span;
+        if (span.Length <= HeaderSize || span[0] != CurrentVersion)
         {
             return false;
         }
 
-        var hopCount = payload[1];
-        var hopLimit = payload[2];
+        var hopCount = span[1];
+        var hopLimit = span[2];
         if (hopLimit is 0 or > MaximumHopLimit || hopCount >= hopLimit)
         {
             return false;
         }
 
-        var destination = new IPAddress(payload.Slice(4, 4));
+        var destination = new IPAddress(span.Slice(4, 4));
+        // The receive loop must finish consuming this view before reusing its datagram buffer.
         packet = new VirtualNetworkMeshPacket(
             hopCount,
             hopLimit,
             destination,
-            payload.Slice(HeaderSize).ToArray());
+            payload[HeaderSize..]);
         return true;
     }
 
     public bool TryCreateForwarded(out byte[] forwardedPayload)
     {
         forwardedPayload = Array.Empty<byte>();
-        if (HopCount + 1 >= HopLimit)
+        if (!CanForward)
         {
             return false;
         }
 
-        forwardedPayload = new byte[HeaderSize + Payload.Length];
-        forwardedPayload[0] = CurrentVersion;
-        forwardedPayload[1] = (byte)(HopCount + 1);
-        forwardedPayload[2] = HopLimit;
-        Destination.GetAddressBytes().CopyTo(forwardedPayload.AsSpan(4, 4));
-        Payload.Span.CopyTo(forwardedPayload.AsSpan(HeaderSize));
+        forwardedPayload = new byte[GetPayloadLength(Payload.Length)];
+        CreateInto(Destination, Payload.Span, forwardedPayload, (byte)(HopCount + 1), HopLimit);
         return true;
     }
 }

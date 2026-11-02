@@ -10,6 +10,10 @@
 2. 创建语义化版本标签，例如 `v1.0.0`。
 3. 推送标签，GitHub Actions 会自动构建并创建 Release。
 
+发布前检查所有待推送提交及暂存文件，不要提交现网配置、Token、密钥、数据库、回滚状态或原始部署日志。公开报告中的节点身份、地址和目录应脱敏。发布包从标签的干净检出构建，不使用本地现网 `publish/` 目录。
+
+版本说明放在 `docs/releases/<tag>.md`，例如 `docs/releases/v1.1.0.md`。工作流优先使用该文件作为 Release 说明；不存在时才使用 GitHub 自动生成的说明。
+
 ```bash
 git switch master
 git pull origin master

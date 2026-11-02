@@ -43,8 +43,10 @@ public sealed class MeshUdpIntegrationTests
         Assert.DoesNotContain(logs, line => line.Contains("direct path selected for 10.66.0.4", StringComparison.OrdinalIgnoreCase));
     }
 
-    [Fact]
-    public async Task ThreeNodesForwardPacketAcrossLowestCostMeshPath()
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ThreeNodesForwardPacketAcrossLowestCostMeshPath(bool encryptionEnabled)
     {
         var authenticationKey = RandomNumberGenerator.GetBytes(32);
         var serverPort = GetFreeUdpPort();
@@ -54,7 +56,7 @@ public sealed class MeshUdpIntegrationTests
         var logs = new ConcurrentQueue<string>();
 
         using var server = new VirtualNetworkRelay(
-            CreateOptions("10.66.0.1", serverPort, null, "mesh-test-server", authenticationKey, []),
+            CreateOptions("10.66.0.1", serverPort, null, "mesh-test-server", authenticationKey, [], encryptionEnabled),
             entry => logs.Enqueue($"server: {entry.Message}"));
         await server.StartAsync();
 
@@ -86,7 +88,7 @@ public sealed class MeshUdpIntegrationTests
             ITunDevice tun,
             string[] excludedAddresses)
         {
-            var options = CreateOptions(address, port, serverPort, name, authenticationKey, excludedAddresses);
+            var options = CreateOptions(address, port, serverPort, name, authenticationKey, excludedAddresses, encryptionEnabled);
             options.AdditionalCandidateEndPoints = [new IPEndPoint(IPAddress.Loopback, port)];
             return new VirtualNetworkTunnel(tun, options, entry => logs.Enqueue($"{name}: {entry.Message}"));
         }
@@ -98,7 +100,8 @@ public sealed class MeshUdpIntegrationTests
         int? remotePort,
         string name,
         byte[] authenticationKey,
-        string[] excludedAddresses)
+        string[] excludedAddresses,
+        bool encryptionEnabled = true)
     {
         return new VirtualNetworkTunnelOptions
         {
@@ -108,6 +111,7 @@ public sealed class MeshUdpIntegrationTests
             PrefixLength = 24,
             NodeName = name,
             AuthenticationKey = authenticationKey,
+            EncryptionEnabled = encryptionEnabled,
             HeartbeatInterval = TimeSpan.FromSeconds(1),
             PeerTimeout = TimeSpan.FromSeconds(6),
             IncludeLocalInterfaceCandidates = false,

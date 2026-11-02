@@ -8,6 +8,9 @@ namespace ProxyNetworker.Core;
 
 public sealed class VirtualNetworkTunnel : IDisposable
 {
+    private const int PeerCleanupIntervalMilliseconds = 250;
+    private static readonly TimeSpan ForwardingDecisionCacheDuration = TimeSpan.FromMilliseconds(250);
+
     private readonly ITunDevice _tunDevice;
     private readonly VirtualNetworkTunnelOptions _options;
     private readonly Action<ProxyNetworkerLogEntry>? _logger;
@@ -20,8 +23,14 @@ public sealed class VirtualNetworkTunnel : IDisposable
     private readonly Dictionary<string, string> _lastForwardingPaths = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, DateTimeOffset> _directPathCooldownByAddress = new(StringComparer.OrdinalIgnoreCase);
     private VirtualNetworkMeshRouteTable _meshRoutes = VirtualNetworkMeshRouteTable.Empty;
+    private VirtualNetworkMeshLink[] _meshRouteLinks = [];
+    private bool _meshRoutesDirty = true;
+    private long _nextPeerCleanupTick;
     private long _meshAdvertisementSequence;
     private long _meshTrafficReportSequence;
+    private IPAddress? _cachedForwardingDestination;
+    private ForwardingDecision? _cachedForwardingDecision;
+    private DateTimeOffset _cachedForwardingDecisionAt;
     private DateTimeOffset _globalDirectPathCooldownUntil;
     private UdpClient? _udpClient;
     private LinuxUdpBatchSocket? _linuxUdpBatchSocket;
@@ -99,6 +108,8 @@ public sealed class VirtualNetworkTunnel : IDisposable
                 await SendRelayRequiredAsync(!_options.EnableDirectPaths, cancellationToken).ConfigureAwait(false);
                 if (_options.EnableDirectPaths)
                 {
+                    Log(ProxyNetworkerLogLevel.Information,
+                        $"Virtual Network stable direct-path selection: {_options.EnableStableDirectPathSelection}.");
                     await SendLocalCandidatesAsync(cancellationToken).ConfigureAwait(false);
                     await SendMeshLinkStateAsync(cancellationToken).ConfigureAwait(false);
                     await SendMeshTrafficReportAsync(cancellationToken).ConfigureAwait(false);
@@ -247,8 +258,7 @@ public sealed class VirtualNetworkTunnel : IDisposable
                     }
 
                     if (!VirtualNetworkFrame.TryParse(
-                        received.Buffer,
-                        received.Length,
+                        received.Memory,
                         _options.AuthenticationKey,
                         _options.EncryptionEnabled,
                         out var frame))
@@ -310,9 +320,9 @@ public sealed class VirtualNetworkTunnel : IDisposable
             {
                 await Task.Delay(_options.HeartbeatInterval, cancellationToken).ConfigureAwait(false);
 
+                CleanupExpiredPeers();
                 if (IsServer)
                 {
-                    CleanupExpiredPeers();
                     continue;
                 }
 
@@ -471,12 +481,7 @@ public sealed class VirtualNetworkTunnel : IDisposable
                 break;
 
             case VirtualNetworkFrameType.MeshPacket:
-                if (VirtualNetworkMeshPacket.TryParse(frame.Payload.Span, out var directMeshPacket))
-                {
-                    var linkAddress = FindDirectPeerAddressLocked(remoteEndPoint) ?? frame.VirtualAddress;
-                    RecordDirectTraffic(linkAddress, remoteEndPoint, 0, frame.Payload.Length);
-                }
-                await HandleMeshPacketAsync(frame, cancellationToken, tunBatch).ConfigureAwait(false);
+                await HandleMeshPacketAsync(frame, cancellationToken, tunBatch, remoteEndPoint).ConfigureAwait(false);
                 break;
 
             case VirtualNetworkFrameType.Packet:
@@ -582,6 +587,7 @@ public sealed class VirtualNetworkTunnel : IDisposable
             }
 
             _meshAdvertisements[key] = (frame.VirtualAddress, advertisement);
+            _meshRoutesDirty = true;
             RebuildMeshRoutesLocked();
         }
     }
@@ -589,12 +595,22 @@ public sealed class VirtualNetworkTunnel : IDisposable
     private async Task HandleMeshPacketAsync(
         VirtualNetworkFrame frame,
         CancellationToken cancellationToken,
-        TunPacketBatch? tunBatch = null)
+        TunPacketBatch? tunBatch = null,
+        IPEndPoint? directEndPoint = null)
     {
-        if (!VirtualNetworkMeshPacket.TryParse(frame.Payload.Span, out var meshPacket))
+        if (!VirtualNetworkMeshPacket.TryParse(frame.Payload, out var meshPacket))
         {
             Log(ProxyNetworkerLogLevel.Warning, $"Ignored malformed mesh packet from {frame.VirtualAddress}.");
             return;
+        }
+
+        if (directEndPoint is not null)
+        {
+            lock (_peersLock)
+            {
+                var linkAddress = FindDirectPeerAddressLocked(directEndPoint) ?? frame.VirtualAddress;
+                RecordDirectTrafficLocked(linkAddress, directEndPoint, 0, frame.Payload.Length);
+            }
         }
 
         if (meshPacket.Destination.Equals(_options.NodeAddress))
@@ -603,7 +619,7 @@ public sealed class VirtualNetworkTunnel : IDisposable
             return;
         }
 
-        if (!meshPacket.TryCreateForwarded(out var forwardedPayload))
+        if (!meshPacket.CanForward)
         {
             Log(ProxyNetworkerLogLevel.Debug, $"Dropped mesh packet from {frame.VirtualAddress} to {meshPacket.Destination} after reaching the hop limit.");
             return;
@@ -611,8 +627,7 @@ public sealed class VirtualNetworkTunnel : IDisposable
 
         SendMeshPacket(
             frame.VirtualAddress,
-            meshPacket.Destination,
-            forwardedPayload,
+            meshPacket,
             cancellationToken);
     }
 
@@ -638,22 +653,23 @@ public sealed class VirtualNetworkTunnel : IDisposable
             return;
         }
 
-        var meshPayload = VirtualNetworkMeshPacket.Create(destination, packet.Span);
         SendMeshPacketFrame(
             _options.NodeAddress,
-            meshPayload,
+            destination,
+            packet,
+            0,
+            VirtualNetworkMeshPacket.DefaultHopLimit,
             decision.EndPoint,
             cancellationToken);
-        RecordDirectTraffic(decision.NextHopAddress, decision.EndPoint, meshPayload.Length, 0);
+        RecordDirectTraffic(decision.NextHopAddress, decision.EndPoint, VirtualNetworkMeshPacket.GetPayloadLength(packet.Length), 0);
     }
 
     private void SendMeshPacket(
         IPAddress sourceAddress,
-        IPAddress destination,
-        byte[] meshPayload,
+        VirtualNetworkMeshPacket meshPacket,
         CancellationToken cancellationToken)
     {
-        var decision = SelectForwardingDecision(destination);
+        var decision = SelectForwardingDecision(meshPacket.Destination);
         if (decision is null)
         {
             return;
@@ -661,53 +677,86 @@ public sealed class VirtualNetworkTunnel : IDisposable
 
         SendMeshPacketFrame(
             sourceAddress,
-            meshPayload,
+            meshPacket.Destination,
+            meshPacket.Payload,
+            (byte)(meshPacket.HopCount + 1),
+            meshPacket.HopLimit,
             decision.EndPoint,
             cancellationToken);
         if (!decision.IsRelay)
         {
-            RecordDirectTraffic(decision.NextHopAddress, decision.EndPoint, meshPayload.Length, 0);
+            RecordDirectTraffic(decision.NextHopAddress, decision.EndPoint, VirtualNetworkMeshPacket.GetPayloadLength(meshPacket.Payload.Length), 0);
         }
     }
 
     private void SendMeshPacketFrame(
         IPAddress sourceAddress,
-        byte[] meshPayload,
+        IPAddress destination,
+        ReadOnlyMemory<byte> packet,
+        byte hopCount,
+        byte hopLimit,
         IPEndPoint nextHopEndPoint,
         CancellationToken cancellationToken)
     {
-        var frameLength = VirtualNetworkFrame.GetFrameLength(meshPayload.Length);
+        cancellationToken.ThrowIfCancellationRequested();
+        var payloadLength = VirtualNetworkMeshPacket.GetPayloadLength(packet.Length);
+        var frameLength = VirtualNetworkFrame.GetFrameLength(payloadLength);
         var frame = ArrayPool<byte>.Shared.Rent(frameLength);
         try
         {
+            var frameSpan = frame.AsSpan(0, frameLength);
+            var meshPayload = VirtualNetworkFrame.GetPayloadBuffer(frameSpan, payloadLength, _options.EncryptionEnabled);
+            VirtualNetworkMeshPacket.CreateInto(destination, packet.Span, meshPayload, hopCount, hopLimit);
             VirtualNetworkFrame.CreateInto(
                 VirtualNetworkFrameType.MeshPacket,
                 sourceAddress,
                 meshPayload,
                 _options.AuthenticationKey,
                 _options.EncryptionEnabled,
-                frame.AsSpan(0, frameLength));
-            SendFrame(frame, frameLength, nextHopEndPoint, cancellationToken);
+                frameSpan);
         }
-        finally
+        catch
         {
             ArrayPool<byte>.Shared.Return(frame);
+            throw;
         }
+
+        SendOwnedFrame(frame, frameLength, nextHopEndPoint, cancellationToken);
     }
 
     private ForwardingDecision? SelectForwardingDecision(IPAddress destination)
     {
         lock (_peersLock)
         {
+            var now = DateTimeOffset.UtcNow;
+            if (_cachedForwardingDecision is not null &&
+                _cachedForwardingDestination is not null &&
+                _cachedForwardingDestination.Equals(destination) &&
+                now - _cachedForwardingDecisionAt <= ForwardingDecisionCacheDuration)
+            {
+                return _cachedForwardingDecision;
+            }
+
             var relayPath = TryGetBestRelayPathLocked(destination);
             VirtualNetworkMeshRoute? meshRoute = null;
             if (!_meshRoutes.TryGetRoute(destination, out var route))
             {
                 if (TryGetBestDirectPathLocked(destination) is null)
                 {
-                    return relayPath is null && _options.RemoteEndPoint is null
-                        ? null
-                        : new ForwardingDecision(_options.RemoteEndPoint!, destination, true, relayPath?.ScoreMilliseconds, "relay");
+                    if (relayPath is null && _options.RemoteEndPoint is null)
+                    {
+                        return null;
+                    }
+
+                    var relayOnlyDecision = new ForwardingDecision(
+                        _options.RemoteEndPoint!,
+                        destination,
+                        true,
+                        relayPath?.ScoreMilliseconds,
+                        "relay");
+                    LogRelayPathLocked(destination, relayOnlyDecision.EndPoint, relayPath?.ScoreMilliseconds);
+                    CacheForwardingDecisionLocked(destination, relayOnlyDecision, now);
+                    return relayOnlyDecision;
                 }
             }
             else
@@ -724,7 +773,7 @@ public sealed class VirtualNetworkTunnel : IDisposable
             if (preferMesh && directPath is not null)
             {
                 var path = meshRoute?.Path ?? $"{_options.NodeAddress} -> {destination}";
-                var signature = $"mesh:{path}";
+                var signature = $"mesh:{path}:{directPath.EndPoint}";
                 if (!_lastForwardingPaths.TryGetValue(AddressKey(destination), out var previous) || previous != signature)
                 {
                     _lastForwardingPaths[AddressKey(destination)] = signature;
@@ -733,26 +782,47 @@ public sealed class VirtualNetworkTunnel : IDisposable
                         $"Virtual Network {pathType} path selected for {destination} via {directPath.EndPoint} ({meshCost:0.0} ms; route {path}).");
                 }
 
-                return new ForwardingDecision(directPath.EndPoint, nextHopAddress, false, meshCost, path);
+                var directDecision = new ForwardingDecision(directPath.EndPoint, nextHopAddress, false, meshCost, path);
+                CacheForwardingDecisionLocked(destination, directDecision, now);
+                return directDecision;
             }
 
             var relay = _options.RemoteEndPoint;
             if (relay is not null)
             {
-                var signature = "relay";
-                if (!_lastForwardingPaths.TryGetValue(AddressKey(destination), out var previous) || previous != signature)
-                {
-                    _lastForwardingPaths[AddressKey(destination)] = signature;
-                    var rtt = relayScore is null ? "pending" : $"{relayScore.Value:0.0} ms";
-                    Log(ProxyNetworkerLogLevel.Information,
-                        $"Virtual Network relay path selected for {destination} via {relay} ({rtt}).");
-                }
+                LogRelayPathLocked(destination, relay, relayScore);
 
-                return new ForwardingDecision(relay, destination, true, relayScore, "relay");
+                var relayDecision = new ForwardingDecision(relay, destination, true, relayScore, "relay");
+                CacheForwardingDecisionLocked(destination, relayDecision, now);
+                return relayDecision;
             }
         }
 
         return null;
+    }
+
+    private void LogRelayPathLocked(IPAddress destination, IPEndPoint relay, double? score)
+    {
+        var signature = $"relay:{relay}";
+        if (_lastForwardingPaths.TryGetValue(AddressKey(destination), out var previous) && previous == signature)
+        {
+            return;
+        }
+
+        _lastForwardingPaths[AddressKey(destination)] = signature;
+        var rtt = score is null ? "pending" : $"{score.Value:0.0} ms";
+        Log(ProxyNetworkerLogLevel.Information,
+            $"Virtual Network relay path selected for {destination} via {relay} ({rtt}).");
+    }
+
+    private void CacheForwardingDecisionLocked(
+        IPAddress destination,
+        ForwardingDecision decision,
+        DateTimeOffset now)
+    {
+        _cachedForwardingDestination = destination;
+        _cachedForwardingDecision = decision;
+        _cachedForwardingDecisionAt = now;
     }
 
     private void RefreshMeshRoutes()
@@ -765,12 +835,21 @@ public sealed class VirtualNetworkTunnel : IDisposable
 
     private void RebuildMeshRoutesLocked()
     {
+        var links = GetLocalMeshLinksLocked();
+        if (!_meshRoutesDirty && links.AsSpan().SequenceEqual(_meshRouteLinks))
+        {
+            return;
+        }
+
         _meshRoutes = VirtualNetworkMeshRouteTable.Build(
             _options.NodeAddress,
-            GetLocalMeshLinksLocked(),
+            links,
             _meshAdvertisements,
             DateTimeOffset.UtcNow,
             TimeSpan.FromTicks(Math.Max(_options.PeerTimeout.Ticks * 2, _options.PeerTimeout.Ticks)));
+        _meshRouteLinks = links;
+        _meshRoutesDirty = false;
+        _cachedForwardingDecision = null;
     }
 
     private VirtualNetworkMeshLink[] GetLocalMeshLinks()
@@ -797,23 +876,17 @@ public sealed class VirtualNetworkTunnel : IDisposable
                 continue;
             }
 
-            var best = state.Paths.Values
-                .Where(path => !path.IsRelay && path.EwmaRttMs is not null && now - path.LastSuccess <= _options.PeerTimeout)
-                .OrderBy(static path => path.ScoreMilliseconds)
-                .FirstOrDefault();
+            var best = FindBestScoredPathLocked(state, isRelay: false, now);
             if (best is null)
             {
                 continue;
             }
 
-            var lossBasisPoints = best.ProbesSent <= 0
-                ? 0
-                : Math.Clamp((int)((Math.Max(best.ProbesSent - best.ProbesReceived, 0) * 10_000L) / best.ProbesSent), 0, 10_000);
             links.Add(VirtualNetworkMeshLink.Create(
                 state.VirtualAddress,
                 (int)Math.Round(best.EwmaRttMs!.Value, MidpointRounding.AwayFromZero),
                 (int)Math.Round(best.JitterMilliseconds, MidpointRounding.AwayFromZero),
-                lossBasisPoints));
+                best.ProbeHistory.LossBasisPoints));
         }
 
         return links.ToArray();
@@ -828,10 +901,7 @@ public sealed class VirtualNetworkTunnel : IDisposable
         }
 
         return _directPeersByAddress.TryGetValue(AddressKey(virtualAddress), out var state)
-            ? state.Paths.Values
-                .Where(path => !path.IsRelay && path.EwmaRttMs is not null && now - path.LastSuccess <= _options.PeerTimeout)
-                .OrderBy(static path => path.ScoreMilliseconds)
-                .FirstOrDefault()
+            ? FindBestScoredPathLocked(state, isRelay: false, now)
             : null;
     }
 
@@ -867,6 +937,7 @@ public sealed class VirtualNetworkTunnel : IDisposable
 
             if (changed)
             {
+                _cachedForwardingDecision = null;
                 _lastForwardingPaths.Clear();
                 RebuildMeshRoutesLocked();
             }
@@ -890,47 +961,93 @@ public sealed class VirtualNetworkTunnel : IDisposable
     {
         var now = DateTimeOffset.UtcNow;
         return _directPeersByAddress.TryGetValue(AddressKey(virtualAddress), out var state)
-            ? state.Paths.Values
-                .Where(path => path.IsRelay && path.EwmaRttMs is not null && now - path.LastSuccess <= _options.PeerTimeout)
-                .OrderBy(static path => path.ScoreMilliseconds)
-                .FirstOrDefault()
+            ? FindBestScoredPathLocked(state, isRelay: true, now)
             : null;
+    }
+
+    private PathMeasurement? FindBestScoredPathLocked(PeerPathState state, bool isRelay, DateTimeOffset now)
+    {
+        PathMeasurement? best = null;
+        PathMeasurement? current = null;
+        var bestScore = double.MaxValue;
+        foreach (var path in state.Paths.Values)
+        {
+            if (path.IsRelay != isRelay ||
+                path.EwmaRttMs is null ||
+                now - path.LastSuccess > _options.PeerTimeout ||
+                now - path.ProbeHistory.LastAcknowledgedAt > _options.PeerTimeout)
+            {
+                continue;
+            }
+
+            if (ReferenceEquals(path, state.SelectedDirectPath))
+            {
+                current = path;
+            }
+
+            var stable = !isRelay && _options.EnableStableDirectPathSelection;
+            var score = stable
+                ? VirtualNetworkDirectPathPolicy.SelectionScore(path.ScoreMilliseconds, path.IsPrivate)
+                : path.ScoreMilliseconds;
+            if (score < bestScore ||
+                (stable && score == bestScore && path.IsPrivate && best is { IsPrivate: false }))
+            {
+                best = path;
+                bestScore = score;
+            }
+        }
+
+        if (!isRelay)
+        {
+            if (_options.EnableStableDirectPathSelection && best is not null && current is not null &&
+                !ReferenceEquals(best, current) &&
+                !VirtualNetworkDirectPathPolicy.ShouldSwitch(
+                    current.ScoreMilliseconds, current.IsPrivate, best.ScoreMilliseconds, best.IsPrivate))
+            {
+                best = current;
+            }
+
+            if (!ReferenceEquals(state.SelectedDirectPath, best))
+            {
+                state.SelectedDirectPath = best;
+                _cachedForwardingDecision = null;
+            }
+        }
+
+        return best;
     }
 
     private async Task ProbeDirectPeersAsync(CancellationToken cancellationToken)
     {
-        List<(IPAddress VirtualAddress, IPEndPoint EndPoint)> probes = new();
+        List<(IPAddress VirtualAddress, IPEndPoint EndPoint, byte[] Payload)> probes = new();
         var now = DateTimeOffset.UtcNow;
         lock (_peersLock)
         {
             foreach (var state in _directPeersByAddress.Values)
             {
+                if (state.VirtualAddress.Equals(_options.NodeAddress))
+                {
+                    continue;
+                }
+
                 foreach (var path in state.Paths.Values)
                 {
-                    path.LastProbeSent = now;
-                    path.ProbesSent++;
-                    if (path.ProbesSent > 256)
+                    var payload = VirtualNetworkPathProbe.Create(state.VirtualAddress);
+                    if (VirtualNetworkPathProbe.TryParse(payload, out var probe))
                     {
-                        path.ProbesSent /= 2;
-                        path.ProbesReceived /= 2;
+                        path.ProbeHistory.RecordSent(probe, now, _options.PeerTimeout);
+                        probes.Add((state.VirtualAddress, path.EndPoint, payload));
                     }
-                    probes.Add((state.VirtualAddress, path.EndPoint));
                 }
             }
         }
 
         foreach (var probe in probes)
         {
-            if (probe.VirtualAddress.Equals(_options.NodeAddress))
-            {
-                continue;
-            }
-
-            var payload = VirtualNetworkPathProbe.Create(probe.VirtualAddress);
             var frame = VirtualNetworkFrame.Create(
                 VirtualNetworkFrameType.PathProbe,
                 _options.NodeAddress,
-                payload,
+                probe.Payload,
                 _options.AuthenticationKey, _options.EncryptionEnabled);
             try
             {
@@ -988,9 +1105,14 @@ public sealed class VirtualNetworkTunnel : IDisposable
 
         endpoints.AddRange(_options.AdditionalCandidateEndPoints);
         return endpoints
+            .Where(IsDirectCandidateAllowed)
             .DistinctBy(static endpoint => endpoint.ToString(), StringComparer.OrdinalIgnoreCase)
             .ToArray();
     }
+
+    private bool IsDirectCandidateAllowed(IPEndPoint endpoint) =>
+        _options.AllowedDirectCandidateAddresses.Count == 0 ||
+        _options.AllowedDirectCandidateAddresses.Contains(endpoint.Address);
 
     private bool IsInVirtualNetwork(IPAddress address)
     {
@@ -1016,7 +1138,9 @@ public sealed class VirtualNetworkTunnel : IDisposable
 
             var previous = state.Candidates.ToArray();
             state.Candidates.Clear();
-            state.Candidates.AddRange(candidates.Where(static endpoint => endpoint.Port > 0).DistinctBy(static endpoint => endpoint.ToString()));
+            state.Candidates.AddRange(candidates
+                .Where(endpoint => endpoint.Port > 0 && IsDirectCandidateAllowed(endpoint))
+                .DistinctBy(static endpoint => endpoint.ToString()));
             var relayEndPoint = _options.RemoteEndPoint;
             if (relayEndPoint is not null)
             {
@@ -1040,6 +1164,7 @@ public sealed class VirtualNetworkTunnel : IDisposable
 
             if (!previous.SequenceEqual(state.Candidates))
             {
+                _cachedForwardingDecision = null;
                 Log(ProxyNetworkerLogLevel.Information,
                     $"Virtual Network direct candidates for {virtualAddress}: {string.Join(", ", state.Candidates)}.");
             }
@@ -1084,6 +1209,10 @@ public sealed class VirtualNetworkTunnel : IDisposable
 
             var isRelay = IsConfiguredServer(remoteEndPoint);
             var path = GetOrCreatePathLocked(state, remoteEndPoint, isRelay);
+            if (!path.ProbeHistory.TryAcknowledge(probe, measuredAt, _options.PeerTimeout))
+            {
+                return;
+            }
             var previousRtt = path.LastRttMs > 0 ? path.LastRttMs : rttMilliseconds;
             var jitterSample = Math.Abs(rttMilliseconds - previousRtt);
             path.EwmaRttMs = path.EwmaRttMs is null
@@ -1094,7 +1223,6 @@ public sealed class VirtualNetworkTunnel : IDisposable
                 : (path.JitterMilliseconds * 0.8) + (jitterSample * 0.2);
             path.LastRttMs = rttMilliseconds;
             path.LastSuccess = measuredAt;
-            path.ProbesReceived++;
             path.Received++;
             SelectBestPathLocked(state);
             RebuildMeshRoutesLocked();
@@ -1119,14 +1247,22 @@ public sealed class VirtualNetworkTunnel : IDisposable
     {
         lock (_peersLock)
         {
-            if (!_directPeersByAddress.TryGetValue(AddressKey(virtualAddress), out var state))
-            {
-                return;
-            }
+            RecordDirectTrafficLocked(virtualAddress, remoteEndPoint, bytesSent, bytesReceived);
+        }
+    }
 
-            var path = GetOrCreatePathLocked(state, remoteEndPoint, isRelay: false);
-            path.BytesSent = SaturatingAdd(path.BytesSent, bytesSent);
-            path.BytesReceived = SaturatingAdd(path.BytesReceived, bytesReceived);
+    private void RecordDirectTrafficLocked(IPAddress virtualAddress, IPEndPoint remoteEndPoint, long bytesSent, long bytesReceived)
+    {
+        if (!_directPeersByAddress.TryGetValue(AddressKey(virtualAddress), out var state))
+        {
+            return;
+        }
+
+        var path = GetOrCreatePathLocked(state, remoteEndPoint, isRelay: false);
+        path.BytesSent = SaturatingAdd(path.BytesSent, bytesSent);
+        path.BytesReceived = SaturatingAdd(path.BytesReceived, bytesReceived);
+        if (bytesReceived > 0)
+        {
             path.LastSuccess = DateTimeOffset.UtcNow;
         }
     }
@@ -1170,14 +1306,16 @@ public sealed class VirtualNetworkTunnel : IDisposable
     private void SelectBestPathLocked(PeerPathState state)
     {
         var now = DateTimeOffset.UtcNow;
-        var relay = _options.RemoteEndPoint is null
+        var direct = IsDirectPathSuspendedLocked(state.VirtualAddress, now)
+            ? null
+            : FindBestScoredPathLocked(state, isRelay: false, now);
+        var relay = FindBestScoredPathLocked(state, isRelay: true, now);
+        var best = direct is not null && (relay is null || direct.ScoreMilliseconds <= relay.ScoreMilliseconds + 3)
+            ? direct
+            : relay;
+        best ??= _options.RemoteEndPoint is null
             ? null
             : state.Paths.GetValueOrDefault(EndPointKey(_options.RemoteEndPoint));
-        var best = state.Paths.Values
-            .Where(path => path.EwmaRttMs is not null && now - path.LastSuccess <= _options.PeerTimeout)
-            .OrderBy(path => path.EwmaRttMs)
-            .ThenBy(path => path.IsRelay)
-            .FirstOrDefault() ?? relay;
         if (best is null)
         {
             return;
@@ -1188,10 +1326,11 @@ public sealed class VirtualNetworkTunnel : IDisposable
         state.LastDirectSeen = best.LastSuccess;
         if (changed)
         {
+            _cachedForwardingDecision = null;
             var pathType = best.IsRelay ? "relay" : "direct";
             var rtt = best.EwmaRttMs is null ? "pending" : $"{best.EwmaRttMs.Value:0.0} ms";
             Log(ProxyNetworkerLogLevel.Information,
-                $"Virtual Network {pathType} path selected for {state.VirtualAddress} via {best.EndPoint} ({rtt}).");
+                $"Virtual Network {pathType} candidate selected for {state.VirtualAddress} via {best.EndPoint} ({rtt}).");
         }
     }
 
@@ -1337,6 +1476,7 @@ public sealed class VirtualNetworkTunnel : IDisposable
 
     private void SendPacketFrame(ReadOnlyMemory<byte> packet, IPEndPoint remoteEndPoint, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var frameLength = VirtualNetworkFrame.GetFrameLength(packet.Length);
         var frame = ArrayPool<byte>.Shared.Rent(frameLength);
         try
@@ -1348,31 +1488,38 @@ public sealed class VirtualNetworkTunnel : IDisposable
                 _options.AuthenticationKey,
                 _options.EncryptionEnabled,
                 frame.AsSpan(0, frameLength));
-            SendFrame(frame, frameLength, remoteEndPoint, cancellationToken);
+        }
+        catch
+        {
+            ArrayPool<byte>.Shared.Return(frame);
+            throw;
+        }
+
+        SendOwnedFrame(frame, frameLength, remoteEndPoint, cancellationToken);
+    }
+
+    private void SendOwnedFrame(byte[] frame, int frameLength, IPEndPoint remoteEndPoint, CancellationToken cancellationToken)
+    {
+        var batchSocket = _linuxUdpBatchSocket;
+        if (batchSocket is not null)
+        {
+            if (!batchSocket.EnqueueOwned(frame, frameLength, remoteEndPoint))
+            {
+                ArrayPool<byte>.Shared.Return(frame);
+            }
+
+            return;
+        }
+
+        try
+        {
+            var udpClient = _udpClient;
+            udpClient?.Client.SendTo(frame, 0, frameLength, SocketFlags.None, remoteEndPoint);
         }
         finally
         {
             ArrayPool<byte>.Shared.Return(frame);
         }
-    }
-
-    private void SendFrame(byte[] frame, int frameLength, IPEndPoint remoteEndPoint, CancellationToken cancellationToken)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        var batchSocket = _linuxUdpBatchSocket;
-        if (batchSocket is not null)
-        {
-            batchSocket.Enqueue(frame.AsSpan(0, frameLength), remoteEndPoint);
-            return;
-        }
-
-        var udpClient = _udpClient;
-        if (udpClient is null)
-        {
-            return;
-        }
-
-        udpClient.Client.SendTo(frame, 0, frameLength, SocketFlags.None, remoteEndPoint);
     }
 
     private async Task SendFrameAsync(byte[] frame, IPEndPoint remoteEndPoint, CancellationToken cancellationToken)
@@ -1456,13 +1603,24 @@ public sealed class VirtualNetworkTunnel : IDisposable
 
     private void CleanupExpiredPeers()
     {
-        var now = DateTimeOffset.UtcNow;
-        var expiresBefore = now - _options.PeerTimeout;
-        var advertisementExpiresBefore = now - TimeSpan.FromTicks(_options.PeerTimeout.Ticks * 2);
-        var expired = new List<string>();
+        var tick = Environment.TickCount64;
+        if (tick < Volatile.Read(ref _nextPeerCleanupTick))
+        {
+            return;
+        }
 
         lock (_peersLock)
         {
+            if (tick < _nextPeerCleanupTick)
+            {
+                return;
+            }
+
+            Volatile.Write(ref _nextPeerCleanupTick, tick + PeerCleanupIntervalMilliseconds);
+            var now = DateTimeOffset.UtcNow;
+            var expiresBefore = now - _options.PeerTimeout;
+            var advertisementExpiresBefore = now - TimeSpan.FromTicks(_options.PeerTimeout.Ticks * 2);
+            var expired = new List<string>();
             foreach (var item in _peersByAddress)
             {
                 if (item.Value.LastSeen < expiresBefore)
@@ -1486,6 +1644,7 @@ public sealed class VirtualNetworkTunnel : IDisposable
                 .ToArray())
             {
                 _meshAdvertisements.Remove(key);
+                _meshRoutesDirty = true;
             }
 
             if (_globalDirectPathCooldownUntil <= now)
@@ -1536,7 +1695,7 @@ public sealed class VirtualNetworkTunnel : IDisposable
             return false;
         }
 
-        address = new IPAddress(new[] { packet[offset], packet[offset + 1], packet[offset + 2], packet[offset + 3] });
+        address = new IPAddress(packet.Slice(offset, 4));
         return true;
     }
 
@@ -1613,6 +1772,8 @@ public sealed class VirtualNetworkTunnel : IDisposable
 
         public IPEndPoint? ActiveEndPoint { get; set; }
 
+        public PathMeasurement? SelectedDirectPath { get; set; }
+
         public DateTimeOffset LastDirectSeen { get; set; }
     }
 
@@ -1622,11 +1783,16 @@ public sealed class VirtualNetworkTunnel : IDisposable
         {
             EndPoint = endPoint;
             IsRelay = isRelay;
+            IsPrivate = VirtualNetworkDirectPathPolicy.IsPrivateAddress(endPoint.Address);
         }
 
         public IPEndPoint EndPoint { get; }
 
         public bool IsRelay { get; }
+
+        public bool IsPrivate { get; }
+
+        public VirtualNetworkPathProbeHistory ProbeHistory { get; } = new();
 
         public double? EwmaRttMs { get; set; }
 
@@ -1635,12 +1801,6 @@ public sealed class VirtualNetworkTunnel : IDisposable
         public long LastRttMs { get; set; }
 
         public DateTimeOffset LastSuccess { get; set; }
-
-        public DateTimeOffset LastProbeSent { get; set; }
-
-        public int ProbesSent { get; set; }
-
-        public int ProbesReceived { get; set; }
 
         public int Received { get; set; }
 
@@ -1653,9 +1813,7 @@ public sealed class VirtualNetworkTunnel : IDisposable
             : VirtualNetworkMeshLink.CalculateCost(
                 (int)Math.Round(EwmaRttMs.Value, MidpointRounding.AwayFromZero),
                 (int)Math.Round(JitterMilliseconds, MidpointRounding.AwayFromZero),
-                ProbesSent <= 0
-                    ? 0
-                    : Math.Clamp((int)((Math.Max(ProbesSent - ProbesReceived, 0) * 10_000L) / ProbesSent), 0, 10_000));
+                ProbeHistory.LossBasisPoints);
     }
 
     private sealed record ForwardingDecision(

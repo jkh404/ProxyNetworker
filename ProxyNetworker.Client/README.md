@@ -72,6 +72,16 @@ sudo sysctl -p /etc/sysctl.d/99-proxynetworker-net.conf
 
 如需在排障时只保留 `vnet_hdr` 读取和普通 TUN 写入，可设置 `PN_DISABLE_GSO_TX=1` 后启动客户端。该开关不影响 AES-GCM/HMAC-only 选择。
 
+外层 UDP 也会尝试启用 `UDP_SEGMENT`（GSO）和 `UDP_GRO`。每个原始帧仍独立认证，协议和 MTU 不变；不支持的内核或发送路径会回退到普通批量 UDP。可分别设置 `PN_DISABLE_UDP_GSO=1`、`PN_DISABLE_UDP_GRO=1` 后重启进程进行对照，两个开关都设置时仅关闭外层 UDP offload，不关闭 `recvmmsg`/`sendmmsg` 或 TUN GSO。
+
+外层 UDP offload 已完成两个测试节点的 Linux x64 原生 A/B。固定私网后，仅开启应用 GSO/GRO，正向均值从 44.12 提升到 49.64 MB/s；再开启对应私网网卡的 `tx-udp-segmentation`，九轮均值为 58.73 MB/s。后一个结果依赖实际出接口及其 offload 状态，并非只换客户端即可获得；详见[原生 A/B 报告与限制](../docs/2026-11-02-linux-udp-offload-ab-report.md)。A/B 阶段结束时曾恢复 NIC 原值；后续稳定性部署已在两节点私网 `eth1` 启用可回退的持久化配置，受控私网再次测得正向 58.73 MB/s、反向 56.81 MB/s。自动选路仍可能走未修改的公网接口，重载反向重传也未消除，不能将私网结果当作所有路径的固定速度。
+
+私网网卡设置的可选持久化工具为 `scripts/Manage-LinuxUdpOffload.py`，独立记录原值，支持服务停止时恢复和能力不满足时的软件降级，不会修改客户端配置或公网网卡。两节点已验证 `systemctl disable --now proxynetworker-udp-offload.service` 关闭自启动并恢复原值，且已重新启用；安装、验证状态、压力测试风险及分层回退步骤见[稳定性与回退记录](../docs/2026-11-02-linux-offload-stability-rollout.md)。该工具不是持续丢包检测或自动故障切换监控器。
+
+新版默认启用稳定直连选路：对经过有效探测的私网候选给予有限偏好，小幅评分变化不来回换路；失效路径仍可切到其他直连候选或中继。`virtualNetwork.stableDirectPathSelection` 默认为 `true`，无需修改旧配置；显式设为 `false` 可恢复原始评分排序，但不撤销探测和存活判断的安全修正。该版本已部署到两个测试节点，在不限制候选地址的原配置下，九次稳态正向均值为 **58.75 MB/s**，约为本轮普通私网基线的 **93.8%**；九次反向均值为 **56.59 MB/s**。冷启动首个文件仍受发现和中继切换影响，本轮为 40.36 MB/s，随后两次均为 58.77 MB/s；不能将稳态值当作每次启动或所有网络的固定速度。单向私网故障回退、恢复和旧程序回滚已实测，详细数据与限制见[默认选路记录](../docs/2026-11-02-default-path-selection-report.md)。
+
+对照测试时可设置 `PN_DIRECT_ADDRESS_ALLOWLIST=10.20.0.11,10.20.0.12`，将本地通告和远端接受的直连候选限定为这些 IPv4 地址。这里是示例地址，列表应包含两端实际使用的地址；默认未设置时不限制候选，配置的中继端点始终保留。该开关不会修改 Token、虚拟 IP 或主机防火墙，测试后移除并重启即可恢复自动候选选择。
+
 Ubuntu/Debian 示例：
 
 ```bash

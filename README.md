@@ -14,7 +14,7 @@ ProxyNetworker 的目标不是简单复制一个端口转发工具，而是把�
 - **UDP/QUIC 双协议**：UDP 提供网状直连和多跳转发；QUIC 为需要可靠流式中继的场景提供备选。KCP 经过实际测试后因尾部延迟过高被移除。
 - **跨平台 Native AOT 客户端**：已实测 Windows 11 x64、Ubuntu 24.04 x64 和 Debian 13 Raspberry Pi arm64，发布后不需要目标机器预装 .NET。
 - **可配置的数据面安全**：Token 按资源发放，虚拟网络使用临时 256 位会话密钥；默认使用 AES-GCM 加密和完整性校验，也可关闭机密性并保留 HMAC-SHA256 完整性校验。
-- **Linux 数据面加速**：UDP 使用 `recvmmsg`/`sendmmsg` 批量收发，TUN 在支持时启用 `vnet_hdr`/GSO 批处理，并对非 GSO 校验和卸载、TSO 分段和不支持平台自动回退。
+- **Linux 数据面加速**：UDP 使用 `recvmmsg`/`sendmmsg` 批量收发，并支持外层 `UDP_SEGMENT`/`UDP_GRO`，保留逐帧认证；TUN 在支持时启用 `vnet_hdr`/GSO 批处理。同时使用零拷贝队列转移、短 TTL 转发决策缓存和单调 GCM nonce，并对不支持的能力自动回退。完整 offload 路径还取决于实际出接口的 UDP segmentation 能力与开关。
 - **面向运维的管理能力**：支持用户与资源配额、Token 管理、网络启停、节点封禁、在线设备、连接历史、协议选择，以及包含服务端、直连和 Mesh 链路的实时拓扑、上下行速率与累计流量视图；管理面板默认中文并可切换英文。
 - **部署门槛低**：服务端使用 SQLite，无外部数据库依赖；支持 Docker Compose；Linux 客户端提供基于 `nohup` 的后台启动脚本。
 - **可验证的工程选择**：协议与平台结论来自实际构建、跨节点测试和延迟数据，而不是只依据理论特性。
@@ -202,6 +202,9 @@ dotnet script ".\通用dotnet编译发布脚本.csx" -- ".\ProxyNetworker.Client
 - [虚拟网络协议与测试结果](ProxyNetworker.Server/README.Protocols.md)
 - [UDP 网状路由架构](docs/MESH_ROUTING.md)
 - [Linux UDP 批处理与 TUN GSO 性能报告](docs/2026-11-01-linux-batch-gso-report.md)
+- [Linux 外层 UDP offload 原生 A/B 与网卡验证](docs/2026-11-02-linux-udp-offload-ab-report.md)
+- [Linux UDP offload 稳定性验证与分层回退](docs/2026-11-02-linux-offload-stability-rollout.md)
+- [默认直连选路策略、验证与部署状态](docs/2026-11-02-default-path-selection-report.md)
 - [四节点虚拟局域网测试与改进报告](docs/2026-11-01-vnet-aot-smart-routing-report.md)
 - [发布新版本](RELEASING.md)
 
