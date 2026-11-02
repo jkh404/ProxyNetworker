@@ -12,14 +12,18 @@ public sealed class MeshUdpIntegrationTests
     public async Task RelayRequiredPeerIsNotAdvertisedAsDirectCandidate()
     {
         var authenticationKey = RandomNumberGenerator.GetBytes(32);
-        var serverPort = GetFreeUdpPort();
-        var clientAPort = GetFreeUdpPort();
-        var clientBPort = GetFreeUdpPort();
+        using var serverReservation = ReserveUdpPort();
+        using var clientAReservation = ReserveUdpPort();
+        using var clientBReservation = ReserveUdpPort();
+        var serverPort = GetPort(serverReservation);
+        var clientAPort = GetPort(clientAReservation);
+        var clientBPort = GetPort(clientBReservation);
         var logs = new ConcurrentQueue<string>();
 
         using var server = new VirtualNetworkRelay(
             CreateOptions("10.66.0.1", serverPort, null, "mesh-test-server", authenticationKey, []),
             entry => logs.Enqueue($"server: {entry.Message}"));
+        serverReservation.Dispose();
         await server.StartAsync();
 
         var tunA = new TestTunDevice();
@@ -31,7 +35,9 @@ public sealed class MeshUdpIntegrationTests
 
         using var clientA = new VirtualNetworkTunnel(tunA, optionsA, entry => logs.Enqueue($"client-a: {entry.Message}"));
         using var clientB = new VirtualNetworkTunnel(tunB, optionsB, entry => logs.Enqueue($"client-b: {entry.Message}"));
+        clientAReservation.Dispose();
         await clientA.StartAsync();
+        clientBReservation.Dispose();
         await clientB.StartAsync();
         await Task.Delay(TimeSpan.FromSeconds(3));
 
@@ -49,15 +55,20 @@ public sealed class MeshUdpIntegrationTests
     public async Task ThreeNodesForwardPacketAcrossLowestCostMeshPath(bool encryptionEnabled)
     {
         var authenticationKey = RandomNumberGenerator.GetBytes(32);
-        var serverPort = GetFreeUdpPort();
-        var relayPort = GetFreeUdpPort();
-        var clientAPort = GetFreeUdpPort();
-        var clientBPort = GetFreeUdpPort();
+        using var serverReservation = ReserveUdpPort();
+        using var relayReservation = ReserveUdpPort();
+        using var clientAReservation = ReserveUdpPort();
+        using var clientBReservation = ReserveUdpPort();
+        var serverPort = GetPort(serverReservation);
+        var relayPort = GetPort(relayReservation);
+        var clientAPort = GetPort(clientAReservation);
+        var clientBPort = GetPort(clientBReservation);
         var logs = new ConcurrentQueue<string>();
 
         using var server = new VirtualNetworkRelay(
             CreateOptions("10.66.0.1", serverPort, null, "mesh-test-server", authenticationKey, [], encryptionEnabled),
             entry => logs.Enqueue($"server: {entry.Message}"));
+        serverReservation.Dispose();
         await server.StartAsync();
 
         var tunA = new TestTunDevice();
@@ -67,8 +78,11 @@ public sealed class MeshUdpIntegrationTests
         using var clientRelay = CreateClient("10.66.0.3", relayPort, "client-relay", tunRelay, []);
         using var clientB = CreateClient("10.66.0.4", clientBPort, "client-b", tunB, ["10.66.0.2"]);
 
+        clientAReservation.Dispose();
         await clientA.StartAsync();
+        relayReservation.Dispose();
         await clientRelay.StartAsync();
+        clientBReservation.Dispose();
         await clientB.StartAsync();
         await Task.Delay(TimeSpan.FromSeconds(5));
 
@@ -119,11 +133,10 @@ public sealed class MeshUdpIntegrationTests
         };
     }
 
-    private static int GetFreeUdpPort()
-    {
-        using var client = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
-        return ((IPEndPoint)client.Client.LocalEndPoint!).Port;
-    }
+    // Keep every selected port bound until its node is ready to acquire it.
+    private static UdpClient ReserveUdpPort() => new(new IPEndPoint(IPAddress.Loopback, 0));
+
+    private static int GetPort(UdpClient reservation) => ((IPEndPoint)reservation.Client.LocalEndPoint!).Port;
 
     private static byte[] CreateIPv4EchoPacket(string source, string destination)
     {
