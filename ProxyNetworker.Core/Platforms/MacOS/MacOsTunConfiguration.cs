@@ -152,7 +152,7 @@ internal static class MacOsTunConfiguration
         // Darwin route can print a routing-socket error and still exit zero.
         var routeSucceeded = command.FileName != "/sbin/route" ||
             (command.Arguments is ["-n", "add", "-inet", "-net", var destination, "-interface", var name] &&
-             output.Trim().Equals($"add net {destination}: gateway {name}", StringComparison.Ordinal));
+             output.Trim().Equals($"add net {destination.Split('/')[0]}: gateway {name}", StringComparison.Ordinal));
         if (exitCode != 0 || !string.IsNullOrWhiteSpace(error) || !routeSucceeded)
         {
             throw new IOException(

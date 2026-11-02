@@ -132,11 +132,11 @@ public sealed class MacOsTunPacketTests
     }
 
     [Theory]
-    [InlineData(0, "add net 198.18.7.0/24: gateway utun42", "", true)]
-    [InlineData(0, "add net 198.18.7.0/24: gateway utun42: File exists", "", false)]
+    [InlineData(0, "add net 198.18.7.0: gateway utun42", "", true)]
+    [InlineData(0, "add net 198.18.7.0: gateway utun42: File exists", "", false)]
     [InlineData(0, "", "route: writing to routing socket: File exists", false)]
     [InlineData(0, "", "", false)]
-    [InlineData(1, "add net 198.18.7.0/24: gateway utun42", "", false)]
+    [InlineData(1, "add net 198.18.7.0: gateway utun42", "", false)]
     public void RouteErrorsCannotBeHiddenByZeroExitStatus(int code, string output, string error, bool succeeds)
     {
         var route = MacOsTunConfiguration.CreateCommands("utun42", new()

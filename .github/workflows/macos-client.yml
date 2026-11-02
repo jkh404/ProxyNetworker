@@ -64,7 +64,7 @@ jobs:
       matrix:
         include:
           - rid: osx-arm64
-            runner: macos-26
+            runner: macos-14
             machine: arm64
           - rid: osx-x64
             runner: macos-15-intel
@@ -123,18 +123,6 @@ jobs:
             file "$file"
           done
           dist/client/ProxyNetworker.Client crypto self-test | tee artifacts/crypto-self-test.txt
-      - name: Isolated utun local-stack smoke
-        shell: bash
-        run: |
-          set -euo pipefail
-          if ! sudo dist/smoke/ProxyNetworker.MacSmoke "$PWD/dist/client/ProxyNetworker.Client" \
-            > artifacts/utun-smoke.json 2> artifacts/utun-smoke.log; then
-            cat artifacts/utun-smoke.log >&2
-            exit 1
-          fi
-          cat artifacts/utun-smoke.json
-          echo "CI local-stack smoke only; physical-Mac interoperability/performance/sleep/UI acceptance is deferred." \
-            >> "$GITHUB_STEP_SUMMARY"
       - name: Package development preview
         shell: bash
         run: |
@@ -150,6 +138,22 @@ jobs:
           archive="ProxyNetworker.Client_${RID}_preview.tar.gz"
           tar -czf "artifacts/packages/$archive" -C "$stage" .
           (cd artifacts/packages && shasum -a 256 "$archive" > SHA256SUMS.txt)
+      - name: Verify packaged client and isolated utun local-stack smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd artifacts/packages && shasum -a 256 -c SHA256SUMS.txt)
+          mkdir -p dist/verify
+          tar -xzf "artifacts/packages/ProxyNetworker.Client_${RID}_preview.tar.gz" -C dist/verify
+          dist/verify/ProxyNetworker.Client crypto self-test | tee artifacts/packaged-crypto-self-test.txt
+          if ! sudo dist/smoke/ProxyNetworker.MacSmoke "$PWD/dist/verify/ProxyNetworker.Client" \
+            > artifacts/utun-smoke.json 2> artifacts/utun-smoke.log; then
+            cat artifacts/utun-smoke.log >&2
+            exit 1
+          fi
+          cat artifacts/utun-smoke.json
+          echo "CI local-stack smoke only; physical-Mac interoperability/performance/sleep/UI acceptance is deferred." \
+            >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v7
         if: always()
         with:
