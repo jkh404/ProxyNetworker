@@ -81,6 +81,16 @@ try
     Require((await Command("/sbin/ifconfig", [name])).Code != 0, "interface cleanup");
     var cleanedRoute = await Command("/sbin/route", ["-n", "get", "-inet", peer.ToString()]);
     Require(!HasInterface(cleanedRoute.Output, name), "interface-owned route cleanup");
+    using (var host = TunDeviceFactory.Create(new TunDeviceOptions
+    {
+        Name = "macos-ci-host-prefix",
+        Address = IPAddress.Parse("198.19.251.1"),
+        PrefixLength = 32
+    }))
+    {
+        await host.StartAsync(deadline.Token);
+        Require(host.IsStarted, "host-only /32 configuration");
+    }
     if (args.Length != 1)
     {
         throw new ArgumentException("Supply the published client executable to validate no-argument configuration startup.");

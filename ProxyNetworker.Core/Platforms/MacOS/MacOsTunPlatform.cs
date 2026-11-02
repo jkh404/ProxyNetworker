@@ -24,6 +24,8 @@ internal sealed class MacOsTunPlatform : IMacOsTunPlatform
 
     public async Task ConfigureAsync(string name, TunDeviceOptions options, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+        MacOsTunConfiguration.RejectConflictingInterfaces(name, options);
         foreach (var command in MacOsTunConfiguration.CreateCommands(name, options))
         {
             await MacOsTunConfiguration.RunCommandAsync(command, cancellationToken).ConfigureAwait(false);

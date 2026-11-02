@@ -121,7 +121,50 @@ public sealed class MacOsTunPacketTests
             PrefixLength = prefix
         });
         Assert.Contains(mask, commands[0].Arguments);
-        Assert.Contains(network, commands[1].Arguments);
+        if (prefix == 32)
+        {
+            Assert.Single(commands);
+        }
+        else
+        {
+            Assert.Contains(network, commands[1].Arguments);
+        }
+    }
+
+    [Theory]
+    [InlineData(0, "add net 198.18.7.0/24: gateway utun42", "", true)]
+    [InlineData(0, "add net 198.18.7.0/24: gateway utun42: File exists", "", false)]
+    [InlineData(0, "", "route: writing to routing socket: File exists", false)]
+    [InlineData(0, "", "", false)]
+    [InlineData(1, "add net 198.18.7.0/24: gateway utun42", "", false)]
+    public void RouteErrorsCannotBeHiddenByZeroExitStatus(int code, string output, string error, bool succeeds)
+    {
+        var route = MacOsTunConfiguration.CreateCommands("utun42", new()
+        {
+            Address = IPAddress.Parse("198.18.7.9"),
+            PrefixLength = 24
+        })[1];
+        if (succeeds)
+        {
+            MacOsTunConfiguration.EnsureSucceeded(route, code, output, error);
+        }
+        else
+        {
+            Assert.Throws<IOException>(() => MacOsTunConfiguration.EnsureSucceeded(route, code, output, error));
+        }
+    }
+
+    [Theory]
+    [InlineData("198.18.7.9", 24, "198.18.7.3", 32, true)]
+    [InlineData("198.18.7.9", 32, "198.18.7.3", 24, true)]
+    [InlineData("198.18.7.9", 24, "198.18.8.3", 24, false)]
+    [InlineData("198.18.7.9", 32, "198.18.7.9", 32, true)]
+    [InlineData("198.18.7.9", 32, "198.18.7.8", 32, false)]
+    public void ConnectedSubnetConflictsAreDetectedBeforeConfiguration(
+        string first, int firstPrefix, string second, int secondPrefix, bool expected)
+    {
+        Assert.Equal(expected, MacOsTunConfiguration.NetworksOverlap(
+            IPAddress.Parse(first), firstPrefix, IPAddress.Parse(second), secondPrefix));
     }
 
     [Theory]

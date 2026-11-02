@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Globalization;
 using System.Net;
+using System.Net.NetworkInformation;
 using System.Net.Sockets;
 
 namespace ProxyNetworker.Core.Platforms.MacOS;
@@ -28,6 +29,40 @@ internal static class MacOsTunConfiguration
         name.Length is > 4 and < 16 && name.StartsWith("utun", StringComparison.Ordinal) &&
         name.AsSpan(4).IndexOfAnyExceptInRange('0', '9') < 0;
 
+    internal static void RejectConflictingInterfaces(string name, TunDeviceOptions options)
+    {
+        foreach (var adapter in NetworkInterface.GetAllNetworkInterfaces())
+        {
+            if (adapter.Name == name)
+            {
+                continue;
+            }
+
+            foreach (var address in adapter.GetIPProperties().UnicastAddresses)
+            {
+                if (address.Address.AddressFamily == AddressFamily.InterNetwork &&
+                    NetworksOverlap(options.Address, options.PrefixLength, address.Address, address.PrefixLength))
+                {
+                    throw new IOException(
+                        $"The virtual subnet conflicts with interface '{adapter.Name}' ({address.Address}/{address.PrefixLength}). " +
+                        "Existing interfaces and routes have not been changed.");
+                }
+            }
+        }
+    }
+
+    internal static bool NetworksOverlap(IPAddress first, int firstPrefix, IPAddress second, int secondPrefix)
+    {
+        Span<byte> bytes = stackalloc byte[4];
+        first.TryWriteBytes(bytes, out _);
+        var firstAddress = BinaryPrimitives.ReadUInt32BigEndian(bytes);
+        second.TryWriteBytes(bytes, out _);
+        var secondAddress = BinaryPrimitives.ReadUInt32BigEndian(bytes);
+        var prefix = Math.Min(firstPrefix, secondPrefix);
+        var mask = prefix == 0 ? 0u : uint.MaxValue << (32 - prefix);
+        return (firstAddress & mask) == (secondAddress & mask);
+    }
+
     internal static MacOsTunCommand[] CreateCommands(string name, TunDeviceOptions options)
     {
         Validate(options);
@@ -47,13 +82,13 @@ internal static class MacOsTunConfiguration
         var destination = $"{new IPAddress(bytes)}/{options.PrefixLength}";
         var local = options.Address.ToString();
 
-        return
-        [
-            new("/sbin/ifconfig",
-                [name, "inet", local, local, "netmask", netmask, "mtu",
-                 options.Mtu.ToString(CultureInfo.InvariantCulture), "up"]),
-            new("/sbin/route", ["-n", "add", "-inet", "-net", destination, "-interface", name])
-        ];
+        var configure = new MacOsTunCommand("/sbin/ifconfig",
+            [name, "inet", local, local, "netmask", netmask, "mtu",
+             options.Mtu.ToString(CultureInfo.InvariantCulture), "up"]);
+        // ifconfig already owns the local host route; /32 has no additional subnet.
+        return options.PrefixLength == 32
+            ? [configure]
+            : [configure, new("/sbin/route", ["-n", "add", "-inet", "-net", destination, "-interface", name])];
     }
 
     internal static async Task RunCommandAsync(MacOsTunCommand command, CancellationToken cancellationToken)
@@ -74,6 +109,7 @@ internal static class MacOsTunConfiguration
         {
             process.StartInfo.ArgumentList.Add(argument);
         }
+        process.StartInfo.Environment["LC_ALL"] = "C";
 
         cancellationToken.ThrowIfCancellationRequested();
         if (!process.Start())
@@ -106,12 +142,21 @@ internal static class MacOsTunConfiguration
             throw new TimeoutException($"Timed out configuring the macOS interface with {command.FileName}.");
         }
 
-        await stdout.ConfigureAwait(false);
+        var output = await stdout.ConfigureAwait(false);
         var error = await stderr.ConfigureAwait(false);
-        if (process.ExitCode != 0)
+        EnsureSucceeded(command, process.ExitCode, output, error);
+    }
+
+    internal static void EnsureSucceeded(MacOsTunCommand command, int exitCode, string output, string error)
+    {
+        // Darwin route can print a routing-socket error and still exit zero.
+        var routeSucceeded = command.FileName != "/sbin/route" ||
+            (command.Arguments is ["-n", "add", "-inet", "-net", var destination, "-interface", var name] &&
+             output.Trim().Equals($"add net {destination}: gateway {name}", StringComparison.Ordinal));
+        if (exitCode != 0 || !string.IsNullOrWhiteSpace(error) || !routeSucceeded)
         {
             throw new IOException(
-                $"{command.FileName} failed with exit code {process.ExitCode}. {error.Trim()} " +
+                $"{command.FileName} failed with exit code {exitCode}. {output.Trim()} {error.Trim()} " +
                 "The macOS virtual-network client needs administrator privileges; existing routes are never replaced.");
         }
     }
