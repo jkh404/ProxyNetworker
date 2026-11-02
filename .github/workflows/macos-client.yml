@@ -79,6 +79,12 @@ jobs:
       - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
+      - name: Select modern Apple Silicon toolchain
+        if: matrix.rid == 'osx-arm64'
+        shell: bash
+        run: |
+          test -d /Applications/Xcode_16.2.app/Contents/Developer
+          echo 'DEVELOPER_DIR=/Applications/Xcode_16.2.app/Contents/Developer' >> "$GITHUB_ENV"
       - name: Record actual native environment
         shell: bash
         run: |
@@ -87,6 +93,7 @@ jobs:
           mkdir -p artifacts/environment
           sw_vers | tee artifacts/environment/os.txt
           uname -m | tee artifacts/environment/architecture.txt
+          xcodebuild -version | tee artifacts/environment/xcode.txt
           xcrun clang --version | tee artifacts/environment/clang.txt
           dotnet --info | tee artifacts/environment/dotnet.txt
           printf '%s\n' "$GITHUB_SHA" > artifacts/environment/commit.txt

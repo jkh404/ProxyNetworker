@@ -40,6 +40,14 @@ git push origin v1.1.0-rc.1
 
 GitHub 还会自动附带对应标签的源码 zip 和 tar.gz。
 
+## macOS 开发预览
+
+macOS 当前使用独立的 `.github/workflows/macos-client.yml`，不加入上述正式发布资产，也不因预览 CI 成功自动发布新版本。工作流分别在 Apple Silicon 和 Intel runner 原生构建 AOT 客户端，生成完整 tar 包及 SHA256，并对解压后的程序执行加密自检和隔离 utun 回环测试。
+
+成功 run 的 `macos-evidence-osx-arm64` / `macos-evidence-osx-x64` artifact 中，`packages/` 包含预览包和 `SHA256SUMS.txt`，其余文件记录环境、源提交与自动测试结果；保留期为 14 天。使用范围、权限、签名状态和回退方式见 [macOS 客户端说明](ProxyNetworker.Client/README.macOS.md)。
+
+预览仅为 ad-hoc 签名，未做 Developer ID 签名、公证或用户 Mac 真机验收。后续正式 Mac 发行需要另行决定验收范围、签名与公证方案，不直接修改正式发布流程的资产数量来冒充平台验收。
+
 ## 重新构建已有标签
 
 在 GitHub 页面依次进入 **Actions** > **Release** > **Run workflow**，输入已经存在的标签，例如 `v1.0.0`，然后运行工作流。

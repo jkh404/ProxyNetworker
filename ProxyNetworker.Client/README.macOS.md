@@ -2,6 +2,8 @@
 
 这是 macOS 命令行客户端的开发预览，提供 `osx-arm64` 和 `osx-x64` 原生构建。当前没有用户 Mac 真机的互通、性能、睡眠唤醒或人工交互验收；CI 构建和回环测试不代表这些项目已通过。
 
+预览包来自 `macOS client preview` 工作流成功运行的 `macos-evidence-osx-arm64` / `macos-evidence-osx-x64` artifact，位于其中的 `packages/` 目录。检查对应 run 的结果和源提交后再使用；保留期为 14 天，不是现有正式 Release 的资产。
+
 ## 组成
 
 请保留完整发布目录，不要只移动可执行文件：
@@ -30,7 +32,7 @@ sudo ./ProxyNetworker.Client
 
 初期以 IPv4、UDP、AES-GCM、MTU 1400 为使用范围；服务端资源应选择 UDP。QUIC 的 macOS 依赖不随本预览打包，不保证可用，也不会静默切换协议。
 
-接口由内核动态命名为 `utunN`，配置中的节点名称不是固定接口名。客户端只添加虚拟网段路由，不替换已有路由，不修改系统默认路由或全局 DNS。自动配置拒绝 `/0` 默认路由。关闭最后一个 utun 句柄会撤销该接口及其所属路由。
+接口由内核动态命名为 `utunN`，配置中的节点名称不是固定接口名。客户端只添加虚拟网段路由，不替换已有路由，不修改系统默认路由或全局 DNS。自动配置拒绝 `/0` 默认路由；与已有接口网段重叠时会在配置前拒绝启动。`/32` 只配置本机地址，不另加子网路由。关闭最后一个 utun 句柄会撤销该接口及其所属路由。
 
 ## 可选后台运行
 
@@ -47,6 +49,14 @@ sudo bash run.sh stop
 
 配置包含凭据，应限制为可信账号可读，不加入 Git；诊断或反馈前先脱敏。
 
+## 停止、回退与诊断
+
+前台使用 `Ctrl+C` 停止，后台使用同一身份执行 `run.sh stop`。正常退出会关闭本客户端的 utun；不要运行批量删路由或销毁所有 `utun` 的命令，其他 VPN 可能也在使用这些接口。
+
+升级前保留原安装目录和配置。回退时先停止当前进程，再使用旧目录中的完整程序与原 `appsettings.json` 启动，保持原 Token；不要混用不同构建的程序和原生桥接库。脚本没有自动更新、持久系统网络设置或默认启用的系统服务。
+
+诊断时记录 `sw_vers`、`uname -m`、实际 `utunN` 的 `ifconfig` 和 `netstat -rn -f inet`。macOS 不提供本项目 Linux `/proc`/GSO 统计，不能把缺失指标填成零。分享日志、路由或接口输出前脱敏，不上传原配置。
+
 ## 签名与验证边界
 
 CI 产物为 ad-hoc 签名，不是 Developer ID 签名，也未公证。`codesign --verify --strict` 仅检查本地签名完整性，不能证明受信任的发行者身份；系统可能阻止从互联网下载的预览程序。本阶段不要求用户关闭 Gatekeeper 或其他系统保护。
@@ -62,7 +72,7 @@ CI 产物为 ad-hoc 签名，不是 Developer ID 签名，也未公证。`codesi
 
 ## 本地原生构建
 
-需要对应架构的 Mac、.NET 10 SDK 和 Xcode Command Line Tools；原生桥接库由项目使用 `xcrun clang` 自动构建。
+需要对应架构的 Mac、.NET 10 SDK 和兼容的 Xcode 工具链；原生桥接库由项目使用 `xcrun clang` 自动构建。Apple Silicon CI 显式选择 Xcode 16.2，不使用旧镜像默认的 Xcode 15.4。
 
 ```sh
 dotnet publish ProxyNetworker.Client/ProxyNetworker.Client.csproj \
