@@ -19,7 +19,12 @@ def verify(directory: Path, rid: str, version: str) -> None:
         abis = {name.split("/")[1] for name in names if name.startswith("lib/")}
         if abis != {abi}:
             raise ValueError(f"Unexpected APK ABIs: {abis}")
-        store = archive.read(f"lib/{abi}/libassembly-store.so")
+        # .NET Android 36.1.2 and later workloads use different ELF store names.
+        store_names = {f"lib/{abi}/libassembly-store.so", f"lib/{abi}/libassemblies.{abi}.blob.so"}
+        stores = [name for name in names if name in store_names]
+        if len(stores) != 1:
+            raise ValueError("Expected exactly one recognized embedded assembly store.")
+        store = archive.read(stores[0])
         if b"ProxyNetworker.App.Android" not in store or b"ProxyNetworker.Client.Runtime" not in store:
             raise ValueError("The APK does not embed the required managed assemblies.")
         if b"spyglass" in store.lower():

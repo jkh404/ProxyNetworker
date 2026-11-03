@@ -88,7 +88,7 @@
 
 - .NET 测试：Core 194 通过、6 项 Linux 原生调用测试因本机是 Windows 而跳过；共享运行时 22 通过；UI/单实例/菜单 18 通过。合计 **234 通过、6 跳过**。
 - 当前解决方案 Release 构建：0 警告、0 错误。
-- Android UI 工具契约测试 4/4、回收工具安全契约 6/6、APK 校验工具测试 8/8；模拟工具结果不计入真实 Android 数据面通过数。Python offload 工具测试 18 通过、3 个 Linux 专用测试跳过。
+- Android UI 工具契约测试 4/4、回收工具安全契约 6/6、APK 校验工具测试 11/11；模拟工具结果不计入真实 Android 数据面通过数。Python offload 工具测试 18 通过、3 个 Linux 专用测试跳过。
 - Windows x64 托管自包含 GUI/Worker 发布通过；Release 文件与依赖中未发现 Spyglass、本地配置或凭据。最终实际托盘测试见上表。
 - Android x64、ARM64 分别完成 Release APK 发布与包检查，均为非 Debug、内嵌程序集、单一对应 ABI；归档及程序集存储名称检查未发现 Spyglass 或配置/数据库。ARM64 仅构建，不表示手机实测。
 - 本地 v1.2.0 x64 最终 APK SHA-256：`07FCF2B440B4DA33EC93D44D99B45FE341EC4B440BE9E8C0A68E8DB868891F63`。
@@ -118,5 +118,7 @@
 GUI 和 Worker 已停止，Android TUN 和两个服务已清除，电池/Doze 状态已恢复。隔离测试宿主、服务端、模拟器及管理监听已停止，见 `v120-final-lab-cleanup.json`。原 Android 测试配置语义未变，原有现网 CLI 进程保留，未修改其配置。原始测试证据继续保留在忽略目录。
 
 最后的停止检查按异步生命周期等待服务清理完成，而不是只凭 TUN 消失断言两个服务同步消失。一次 Force Stop 后过早调用 UI 自动化出现空根节点，工具按失败处理，没有读取旧快照；随后重新执行完整的十秒检查及新鲜 UI 状态验证通过。
+
+首次提交后的 Android CI 在包校验步骤失败：CI 的 Android 36.1.2 workload 使用 `libassemblies.<ABI>.blob.so`，本地较新 workload 使用 `libassembly-store.so`。按上游生成器确认两种格式后，校验只接受一个匹配当前 ABI 的已知存储文件，并保留程序集身份和 Spyglass 检查；新增旧命名、未知命名和双存储拒绝回归，不关闭校验来放行。
 
 Mac 真机验收继续按用户约定暂缓，不用本轮 Windows/Android 结果代替。

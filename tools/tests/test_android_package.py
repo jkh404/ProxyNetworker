@@ -17,7 +17,8 @@ spec.loader.exec_module(package)
 
 class AndroidPackageTests(unittest.TestCase):
     def check_package(self, *, abi="x86_64", store=None, extra=None,
-                      version="1.2.0", debug=False, manifest=None):
+                      version="1.2.0", debug=False, manifest=None,
+                      store_name="libassembly-store.so"):
         if store is None:
             store = b"ProxyNetworker.App.Android\0ProxyNetworker.Client.Runtime"
         if manifest is None:
@@ -32,7 +33,7 @@ class AndroidPackageTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as directory:
             with zipfile.ZipFile(Path(directory) / "client-Signed.apk", "w") as archive:
-                archive.writestr(f"lib/{abi}/libassembly-store.so", store)
+                archive.writestr(f"lib/{abi}/{store_name}", store)
                 if extra:
                     archive.writestr(extra, "")
             with patch.object(package.subprocess, "check_output", side_effect=[badging, manifest]):
@@ -41,6 +42,17 @@ class AndroidPackageTests(unittest.TestCase):
 
     def test_release_package(self):
         self.check_package()
+
+    def test_android_36_1_2_store_name(self):
+        self.check_package(store_name="libassemblies.x86_64.blob.so")
+
+    def test_unknown_store_name_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "recognized"):
+            self.check_package(store_name="not-the-assembly-store.so")
+
+    def test_multiple_stores_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "exactly one"):
+            self.check_package(extra="lib/x86_64/libassemblies.x86_64.blob.so")
 
     def test_wrong_abi(self):
         with self.assertRaisesRegex(ValueError, "ABIs"):
