@@ -1,6 +1,9 @@
 using System.Text.Json;
 
-internal sealed class ProxyNetworkerClientConfig
+namespace ProxyNetworker.Client.Runtime;
+
+/// <summary>Configuration shared by the console, desktop and Android clients.</summary>
+public sealed class ProxyNetworkerClientConfig
 {
     public const string AppSettingsSectionName = "ProxyNetworkerClient";
 
@@ -15,6 +18,11 @@ internal sealed class ProxyNetworkerClientConfig
     public static async Task<ProxyNetworkerClientConfig> LoadAsync(string path, CancellationToken cancellationToken)
     {
         await using var stream = File.OpenRead(path);
+        return await LoadAsync(stream, cancellationToken).ConfigureAwait(false);
+    }
+
+    public static async Task<ProxyNetworkerClientConfig> LoadAsync(Stream stream, CancellationToken cancellationToken)
+    {
         using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken).ConfigureAwait(false);
         var root = document.RootElement;
 
@@ -131,7 +139,8 @@ internal sealed class ProxyNetworkerClientConfig
     }
 }
 
-internal sealed class RemotePortTunnelClientConfig
+/// <summary>A token-authenticated remote port tunnel.</summary>
+public sealed class RemotePortTunnelClientConfig
 {
     public bool Enabled { get; set; } = true;
 
@@ -142,7 +151,8 @@ internal sealed class RemotePortTunnelClientConfig
     public string Token { get; set; } = string.Empty;
 }
 
-internal sealed class DirectVirtualNetworkClientConfig
+/// <summary>A token-authenticated or explicitly configured virtual network.</summary>
+public sealed class DirectVirtualNetworkClientConfig
 {
     public bool Enabled { get; set; }
 

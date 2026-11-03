@@ -5,6 +5,8 @@
 
 ProxyNetworker 是一个面向自托管场景的网络工具，提供公网端口穿透和加密虚拟局域网能力。项目由 ASP.NET Core 服务端、跨平台客户端和共享网络核心组成。
 
+新增的 [Avalonia 桌面与 Android 客户端](ProxyNetworker.App/README.md) 独立于 CLI，当前为开发预览。Windows x64 和 Android x64 模拟器的具体实测、后台运行边界及未覆盖平台见 [验收记录](docs/2026-11-03-client-acceptance-report.md)。
+
 ## 项目亮点
 
 ProxyNetworker 的目标不是简单复制一个端口转发工具，而是把端口穿透、加密虚拟局域网、网状智能选路和可视化管理整合到一套可自托管方案中。
@@ -196,6 +198,7 @@ dotnet script ".\通用dotnet编译发布脚本.csx" -- ".\ProxyNetworker.Client
 
 ## 文档
 
+- [客户端路线图：macOS、Avalonia 桌面端与 Android 评估](docs/CLIENT_ROADMAP.md)
 - [客户端使用与 AOT 发布](ProxyNetworker.Client/README.md)
 - [服务端 Docker 部署](ProxyNetworker.Server/README.Docker.md)
 - [服务端配置说明](ProxyNetworker.Server/README.Configuration.md)

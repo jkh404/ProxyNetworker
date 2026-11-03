@@ -49,4 +49,34 @@ public sealed class TokenSingleInstanceLockTests
             }
         }
     }
+
+    [Fact]
+    public void ReadOnlyLockStillExcludesAnotherClient()
+    {
+        var token = "ptun_" + Guid.NewGuid().ToString("N");
+        var path = TokenSingleInstanceLock.GetLockFilePath(token);
+        try
+        {
+            using (var original = TokenSingleInstanceLock.TryAcquire(token))
+                Assert.NotNull(original);
+            var before = File.ReadAllText(path);
+            File.SetAttributes(path, File.GetAttributes(path) | FileAttributes.ReadOnly);
+            using (var lease = TokenSingleInstanceLock.TryAcquire(token))
+            {
+                Assert.NotNull(lease);
+                Assert.Null(TokenSingleInstanceLock.TryAcquire(token));
+            }
+            if (OperatingSystem.IsWindows()) Assert.Equal(before, File.ReadAllText(path));
+            using var next = TokenSingleInstanceLock.TryAcquire(token);
+            Assert.NotNull(next);
+        }
+        finally
+        {
+            if (File.Exists(path))
+            {
+                File.SetAttributes(path, File.GetAttributes(path) & ~FileAttributes.ReadOnly);
+                File.Delete(path);
+            }
+        }
+    }
 }

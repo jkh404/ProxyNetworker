@@ -3,7 +3,10 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Serialization.Metadata;
 
-internal sealed class ManagementApiClient : IDisposable
+namespace ProxyNetworker.Client.Runtime;
+
+/// <summary>Accesses the existing management and token configuration API.</summary>
+public sealed class ManagementApiClient : IDisposable
 {
     private readonly HttpClientHandler _handler;
     private readonly HttpClient _httpClient;
@@ -178,13 +181,13 @@ internal sealed class ManagementApiClient : IDisposable
     }
 }
 
-internal sealed record LoginRequest(string Username, string Password);
+public sealed record LoginRequest(string Username, string Password);
 
-internal sealed record ChangePasswordRequest(string CurrentPassword, string NewPassword);
+public sealed record ChangePasswordRequest(string CurrentPassword, string NewPassword);
 
-internal sealed record ErrorResponse(string Message);
+public sealed record ErrorResponse(string Message);
 
-internal sealed record AccountResponse(
+public sealed record AccountResponse(
     string Id,
     string Username,
     string Role,
@@ -198,13 +201,13 @@ internal sealed record AccountResponse(
     DateTimeOffset CreatedAt,
     DateTimeOffset PasswordChangedAt);
 
-internal sealed record CreatePortTunnelDefinitionRequest(
+public sealed record CreatePortTunnelDefinitionRequest(
     string Name,
     string Protocol,
     string PrivateHost,
     int PrivatePort);
 
-internal sealed record CreateVirtualNetworkDefinitionRequest(
+public sealed record CreateVirtualNetworkDefinitionRequest(
     string Name,
     string GatewayAddress,
     int PrefixLength,
@@ -213,7 +216,7 @@ internal sealed record CreateVirtualNetworkDefinitionRequest(
     string TransportProtocol,
     bool EncryptionEnabled);
 
-internal sealed record VirtualNetworkDefinitionResponse(
+public sealed record VirtualNetworkDefinitionResponse(
     string Id,
     string OwnerUserId,
     string Name,
@@ -226,7 +229,7 @@ internal sealed record VirtualNetworkDefinitionResponse(
     bool IsEnabled,
     DateTimeOffset CreatedAt);
 
-internal sealed record PortTunnelDefinitionResponse(
+public sealed record PortTunnelDefinitionResponse(
     string Id,
     string OwnerUserId,
     string Name,
@@ -238,12 +241,12 @@ internal sealed record PortTunnelDefinitionResponse(
     long MaxTrafficSpeedBytesPerSecond,
     DateTimeOffset CreatedAt);
 
-internal sealed record CreateAccessTokenRequest(
+public sealed record CreateAccessTokenRequest(
     string TokenType,
     DateTimeOffset? ValidFrom,
     DateTimeOffset? ValidUntil);
 
-internal sealed record AccessTokenResponse(
+public sealed record AccessTokenResponse(
     string Id,
     string ScopeKind,
     string ResourceId,
@@ -254,11 +257,11 @@ internal sealed record AccessTokenResponse(
     bool IsConsumed,
     DateTimeOffset CreatedAt);
 
-internal sealed record CreatedAccessTokenResponse(
+public sealed record CreatedAccessTokenResponse(
     AccessTokenResponse Token,
     string PlainTextToken);
 
-internal sealed record VirtualNetworkClientConfigResponse(
+public sealed record VirtualNetworkClientConfigResponse(
     string NetworkId,
     string Name,
     string ServerHost,

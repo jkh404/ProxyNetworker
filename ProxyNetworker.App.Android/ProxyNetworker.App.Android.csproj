@@ -1,0 +1,53 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-android36.0</TargetFramework>
+    <SupportedOSPlatformVersion>26</SupportedOSPlatformVersion>
+    <RuntimeIdentifiers>android-arm64;android-x64</RuntimeIdentifiers>
+    <ApplicationId>io.github.jkh404.proxynetworker</ApplicationId>
+    <ApplicationTitle>ProxyNetworker</ApplicationTitle>
+    <ApplicationDisplayVersion>1.2.0</ApplicationDisplayVersion>
+    <ApplicationVersion>10200</ApplicationVersion>
+    <AndroidPackageFormats>apk</AndroidPackageFormats>
+    <EmbedAssembliesIntoApk>true</EmbedAssembliesIntoApk>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Avalonia.Android" Version="12.1.4" />
+    <PackageReference Include="TKCode.Spyglass.Agent" Version="0.1.3" Condition="'$(Configuration)' == 'Debug'" />
+    <PackageReference Include="StirlingLabs.MsQuic.Bindings.runtime.linux-x64.openssl" Version="2.2.2" ExcludeAssets="all" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.Native.Quic.MsQuic.OpenSSL" Version="2.6.3" ExcludeAssets="all" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.Native.Quic.MsQuic.Schannel" Version="2.6.3" ExcludeAssets="all" PrivateAssets="all" />
+    <ProjectReference Include="../ProxyNetworker.App/ProxyNetworker.App.csproj" />
+  </ItemGroup>
+  <Target Name="ValidateVpnServiceManifest" AfterTargets="_ManifestMerger"
+          Condition="Exists('$(IntermediateOutputPath)android/AndroidManifest.xml')">
+    <XmlPeek XmlInputPath="$(IntermediateOutputPath)android/AndroidManifest.xml"
+             Namespaces="&lt;Namespace Prefix='android' Uri='http://schemas.android.com/apk/res/android' /&gt;"
+             Query="/manifest/application/service[@android:name='io.github.jkh404.proxynetworker.NetworkVpnService']/@android:foregroundServiceType">
+      <Output TaskParameter="Result" ItemName="_VpnForegroundType" />
+    </XmlPeek>
+    <XmlPeek XmlInputPath="$(IntermediateOutputPath)android/AndroidManifest.xml"
+             Namespaces="&lt;Namespace Prefix='android' Uri='http://schemas.android.com/apk/res/android' /&gt;"
+             Query="/manifest/application/service[@android:name='io.github.jkh404.proxynetworker.NetworkVpnService']/@android:permission">
+      <Output TaskParameter="Result" ItemName="_VpnBindingPermission" />
+    </XmlPeek>
+    <Error Condition="'@(_VpnForegroundType)' != 'specialUse'" Text="The merged Android VPN service must declare foregroundServiceType=specialUse." />
+    <Error Condition="'@(_VpnBindingPermission)' != 'android.permission.BIND_VPN_SERVICE'" Text="The merged Android VPN service must require BIND_VPN_SERVICE." />
+    <XmlPeek XmlInputPath="$(IntermediateOutputPath)android/AndroidManifest.xml"
+             Namespaces="&lt;Namespace Prefix='android' Uri='http://schemas.android.com/apk/res/android' /&gt;"
+             Query="/manifest/application/service[@android:name='io.github.jkh404.proxynetworker.NetworkVpnService']/@android:stopWithTask">
+      <Output TaskParameter="Result" ItemName="_VpnStopWithTask" />
+    </XmlPeek>
+    <Error Condition="'@(_VpnStopWithTask)' != 'false'" Text="The merged Android VPN service must not stop when the app task is dismissed." />
+    <XmlPeek XmlInputPath="$(IntermediateOutputPath)android/AndroidManifest.xml"
+             Namespaces="&lt;Namespace Prefix='android' Uri='http://schemas.android.com/apk/res/android' /&gt;"
+             Query="/manifest/application/service[@android:name='io.github.jkh404.proxynetworker.NetworkClientService'][@android:exported='false'][@android:stopWithTask='false'][@android:foregroundServiceType='specialUse'][not(@android:process)]/@android:name">
+      <Output TaskParameter="Result" ItemName="_ForegroundSessionService" />
+    </XmlPeek>
+    <Error Condition="'@(_ForegroundSessionService)' != 'io.github.jkh404.proxynetworker.NetworkClientService'"
+           Text="The foreground session host must be private, remain in the application process, and survive task dismissal." />
+  </Target>
+</Project>

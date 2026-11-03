@@ -1,0 +1,181 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:ProxyNetworker.App"
+             xmlns:rt="using:ProxyNetworker.Client.Runtime"
+             xmlns:icons="https://github.com/AIDotNet/TKCode.Arc/lucide"
+             xmlns:arc="https://github.com/AIDotNet/TKCode.Arc"
+             x:Class="ProxyNetworker.App.MainView"
+             x:DataType="vm:MainViewModel"
+             Foreground="{arc:ArcDesignTokenResource Foreground}"
+             Background="{arc:ArcDesignTokenResource Background}">
+  <Grid RowDefinitions="Auto,Auto,*">
+    <Border Padding="{DynamicResource PageInset}" Background="{arc:ArcDesignTokenResource Surface}" BorderBrush="{arc:ArcDesignTokenResource Border}" BorderThickness="0,0,0,1">
+      <Grid ColumnDefinitions="Auto,*,Auto">
+        <icons:LucideIcon Kind="Network" Size="24" Foreground="{arc:ArcDesignTokenResource Accent}" />
+        <StackPanel Grid.Column="1" Margin="12,0,0,0" Orientation="Horizontal" Spacing="8">
+          <TextBlock Text="ProxyNetworker" FontSize="{arc:ArcDesignTokenResource TypeXL}" FontWeight="SemiBold" VerticalAlignment="Center" />
+        </StackPanel>
+        <StackPanel Grid.Column="2" Orientation="Horizontal">
+          <arc:Button Classes="icon" Variant="Ghost" Click="OnTheme" arc:Tooltip.Tip="切换明暗主题" AutomationProperties.Name="切换明暗主题">
+            <icons:LucideIcon Kind="SunMoon" Size="20" />
+          </arc:Button>
+          <arc:Button Classes="icon" Variant="Ghost" Click="OnImport" IsEnabled="{Binding CanEditConfiguration}"
+                      arc:Tooltip.Tip="导入配置" AutomationProperties.Name="导入配置">
+            <icons:LucideIcon Kind="FolderOpen" Size="20" />
+          </arc:Button>
+        </StackPanel>
+      </Grid>
+    </Border>
+    <Border Grid.Row="1" Padding="{DynamicResource PageInset}" BorderBrush="{arc:ArcDesignTokenResource Border}" BorderThickness="0,0,0,1">
+      <Grid ColumnDefinitions="*,Auto">
+        <StackPanel Spacing="5">
+          <TextBlock x:Name="StatusText" Text="{Binding Status}" FontSize="{arc:ArcDesignTokenResource TypeLG}" FontWeight="SemiBold" />
+          <TextBlock Text="{Binding VirtualAddress}" Classes="muted" />
+        </StackPanel>
+        <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+          <arc:Button x:Name="DisconnectButton" Variant="Secondary" Command="{Binding DisconnectCommand}" arc:Tooltip.Tip="断开连接">
+            <StackPanel Orientation="Horizontal" Spacing="7">
+              <icons:LucideIcon Kind="Unplug" Width="16" Height="16" /><TextBlock Text="断开" />
+            </StackPanel>
+          </arc:Button>
+          <arc:Button x:Name="ConnectButton" Command="{Binding ConnectCommand}" IsLoading="{Binding Busy}" arc:Tooltip.Tip="启动连接">
+            <StackPanel Orientation="Horizontal" Spacing="7">
+              <icons:LucideIcon Kind="Power" Size="16" /><TextBlock Text="连接" />
+            </StackPanel>
+          </arc:Button>
+        </StackPanel>
+      </Grid>
+    </Border>
+    <ScrollViewer x:Name="ContentScroll" Grid.Row="2" HorizontalScrollBarVisibility="Disabled"
+                  VerticalScrollBarVisibility="Auto" AllowAutoHide="False">
+    <arc:Tabs Margin="{DynamicResource PageInset}" AutomationProperties.Name="客户端视图">
+      <arc:TabItem Header="连接">
+          <StackPanel Margin="12,18,12,24" Spacing="20">
+            <arc:Alert x:Name="ErrorText" IsVisible="{Binding HasError}" IsOpen="{Binding HasError}" Title="连接未完成" Content="{Binding Error}" Tone="Danger" />
+            <TextBlock Text="{Binding Notice}" Foreground="{arc:ArcDesignTokenResource Success}" IsVisible="{Binding HasNotice}" />
+            <Grid ColumnDefinitions="*,*" RowDefinitions="Auto,Auto" Margin="0,0,0,2">
+              <StackPanel Spacing="5">
+                <TextBlock Text="上传" Classes="muted" />
+                <TextBlock Text="{Binding UploadRate}" FontSize="{arc:ArcDesignTokenResource TypeXL}" FontWeight="SemiBold" />
+                <TextBlock Text="{Binding Sent}" Classes="muted" />
+              </StackPanel>
+              <StackPanel Grid.Column="1" Spacing="5">
+                <TextBlock Text="下载" Classes="muted" />
+                <TextBlock Text="{Binding DownloadRate}" FontSize="{arc:ArcDesignTokenResource TypeXL}" FontWeight="SemiBold" />
+                <TextBlock Text="{Binding Received}" Classes="muted" />
+              </StackPanel>
+            </Grid>
+            <Border BorderBrush="{arc:ArcDesignTokenResource Border}" BorderThickness="0,1,0,0" Padding="0,16,0,0">
+              <Grid ColumnDefinitions="*,*" RowDefinitions="Auto,Auto" RowSpacing="12">
+                <StackPanel><TextBlock Text="接口" Classes="label" /><TextBlock Text="{Binding InterfaceName}" /></StackPanel>
+                <StackPanel Grid.Column="1"><TextBlock Text="传输协议" Classes="label" /><TextBlock Text="{Binding Transport}" /></StackPanel>
+                <StackPanel Grid.Row="1"><TextBlock Text="加密" Classes="label" /><TextBlock Text="{Binding Encryption}" /></StackPanel>
+                <StackPanel Grid.Row="1" Grid.Column="1"><TextBlock Text="端口隧道" Classes="label" /><TextBlock Text="{Binding PortStatus}" /></StackPanel>
+              </Grid>
+            </Border>
+            <StackPanel IsEnabled="{Binding CanEditConfiguration}" Spacing="16">
+              <Grid ColumnDefinitions="*,Auto">
+                <TextBlock Text="连接配置" FontWeight="SemiBold" FontSize="{arc:ArcDesignTokenResource TypeBase}" VerticalAlignment="Center" />
+                <arc:Button Grid.Column="1" Classes="icon" Variant="Ghost" Command="{Binding SaveCommand}"
+                            arc:Tooltip.Tip="保存配置" AutomationProperties.Name="保存配置">
+                  <icons:LucideIcon Kind="Save" Width="19" Height="19" />
+                </arc:Button>
+              </Grid>
+              <Grid x:Name="FormGrid" ColumnDefinitions="*,20,*" RowDefinitions="Auto,Auto" RowSpacing="16">
+                <StackPanel x:Name="ServerField">
+                  <arc:Input x:Name="ServerInput" Label="管理服务端" Text="{Binding Server}" Placeholder="https://server.example.com"
+                             ErrorMessage="{Binding ServerError}" />
+                </StackPanel>
+                <StackPanel x:Name="NameField" Grid.Column="2">
+                  <arc:Input x:Name="NodeNameInput" Label="节点名称" Text="{Binding NodeName}" ErrorMessage="{Binding NodeNameError}" />
+                </StackPanel>
+                <StackPanel x:Name="TokenField" Grid.Row="1" Grid.ColumnSpan="3">
+                  <arc:PasswordField x:Name="TokenInput" Label="Access Token" Text="{Binding Token}" Placeholder="vnet_..."
+                                     ErrorMessage="{Binding TokenError}" ShowPasswordText="显示 Token" HidePasswordText="隐藏 Token" />
+                </StackPanel>
+              </Grid>
+              <arc:Input Label="虚拟网服务端" Text="{Binding NetworkServer}" Placeholder="留空继承管理服务端" />
+              <arc:Checkbox x:Name="VirtualNetworkToggle" IsChecked="{Binding VirtualNetworkEnabled}" Content="启用虚拟局域网" />
+              <arc:Checkbox IsChecked="{Binding RelayOnly}" Content="仅使用中继" />
+              <arc:Checkbox IsChecked="{Binding StableDirectPathSelection}" Content="稳定直连选路" />
+              <StackPanel>
+                <TextBlock Text="端口隧道" FontWeight="SemiBold" Margin="0,8,0,12" />
+                <StackPanel Spacing="12">
+                  <ItemsControl ItemsSource="{Binding PortTunnels}">
+                    <ItemsControl.ItemTemplate>
+                      <DataTemplate x:DataType="vm:PortTunnelEditor">
+                        <Border BorderBrush="{arc:ArcDesignTokenResource Border}" BorderThickness="0,0,0,1" Padding="0,12">
+                          <StackPanel Spacing="8">
+                            <Grid ColumnDefinitions="Auto,*,Auto">
+                              <arc:Checkbox IsChecked="{Binding Enabled}" AutomationProperties.Name="启用端口隧道" VerticalAlignment="Center" />
+                              <arc:Input Grid.Column="1" Text="{Binding Name}" Label="隧道名称" Margin="8,0" />
+                              <arc:Button Grid.Column="2" Classes="icon" Variant="Danger" Command="{Binding RemoveCommand}"
+                                          arc:Tooltip.Tip="移除端口隧道" AutomationProperties.Name="移除端口隧道">
+                                <icons:LucideIcon Kind="Trash" Width="17" Height="17" />
+                              </arc:Button>
+                            </Grid>
+                            <arc:Input Text="{Binding Server}" Label="隧道服务端" Placeholder="留空继承管理服务端" />
+                            <arc:PasswordField Text="{Binding Token}" Label="Access Token" Placeholder="ptun_..."
+                                               ShowPasswordText="显示 Token" HidePasswordText="隐藏 Token" />
+                          </StackPanel>
+                        </Border>
+                      </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                  </ItemsControl>
+                  <arc:Button Variant="Secondary" Command="{Binding AddPortCommand}" arc:Tooltip.Tip="新增端口隧道" HorizontalAlignment="Left">
+                    <StackPanel Orientation="Horizontal" Spacing="7"><icons:LucideIcon Kind="Plus" Width="16" Height="16" /><TextBlock Text="添加隧道" /></StackPanel>
+                  </arc:Button>
+                </StackPanel>
+              </StackPanel>
+            </StackPanel>
+          </StackPanel>
+      </arc:TabItem>
+      <arc:TabItem Header="节点">
+          <StackPanel Margin="12,20" Spacing="12">
+            <arc:EmptyState Title="暂无已发现节点" Label="节点列表" IsVisible="{Binding !HasPeers}" />
+            <ItemsControl ItemsSource="{Binding Peers}">
+              <ItemsControl.ItemTemplate>
+                <DataTemplate x:DataType="vm:ClientPeerRow">
+                  <Border Padding="0,16" BorderBrush="{arc:ArcDesignTokenResource Border}" BorderThickness="0,0,0,1">
+                    <Grid ColumnDefinitions="*,Auto">
+                      <StackPanel Spacing="6">
+                        <TextBlock Text="{Binding Address}" FontWeight="SemiBold" />
+                        <TextBlock Text="{Binding Endpoint}" Classes="muted" TextWrapping="Wrap" />
+                      </StackPanel>
+                      <StackPanel Grid.Column="1" Spacing="6" Margin="12,0,0,0">
+                        <TextBlock Text="{Binding Path}" Foreground="{arc:ArcDesignTokenResource AccentStrong}" HorizontalAlignment="Right" />
+                        <TextBlock Text="{Binding Rtt}" Classes="muted" HorizontalAlignment="Right" />
+                      </StackPanel>
+                    </Grid>
+                  </Border>
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+          </StackPanel>
+      </arc:TabItem>
+      <arc:TabItem Header="日志">
+        <Grid RowDefinitions="Auto,*" Margin="12,12,12,18">
+          <Grid ColumnDefinitions="*,Auto" Margin="0,0,0,12">
+            <TextBlock Text="运行日志" FontSize="{arc:ArcDesignTokenResource TypeBase}" FontWeight="SemiBold" VerticalAlignment="Center" />
+            <arc:Button Grid.Column="1" Classes="icon" Variant="Ghost" Click="OnExport"
+                        arc:Tooltip.Tip="导出脱敏诊断" AutomationProperties.Name="导出脱敏诊断">
+              <icons:LucideIcon Kind="Download" Width="19" Height="19" />
+            </arc:Button>
+          </Grid>
+          <ItemsControl Grid.Row="1" ItemsSource="{Binding Logs}">
+            <ItemsControl.ItemTemplate>
+              <DataTemplate x:DataType="rt:ClientLog">
+                <StackPanel Margin="4,7" Spacing="5">
+                  <TextBlock Classes="muted" Text="{Binding Timestamp, StringFormat='{}{0:HH:mm:ss}'}" />
+                  <TextBlock Text="{Binding Message}" TextWrapping="Wrap" />
+                </StackPanel>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+          <arc:EmptyState Grid.Row="1" Title="暂无运行日志" Label="运行日志" IsVisible="{Binding !HasLogs}" />
+        </Grid>
+      </arc:TabItem>
+    </arc:Tabs>
+    </ScrollViewer>
+  </Grid>
+</UserControl>

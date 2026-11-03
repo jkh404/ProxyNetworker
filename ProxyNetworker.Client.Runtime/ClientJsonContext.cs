@@ -1,6 +1,8 @@
 using System.Text.Json.Serialization;
 using ProxyNetworker.Core.PortTunnels.Remote;
 
+namespace ProxyNetworker.Client.Runtime;
+
 [JsonSourceGenerationOptions(
     PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,
     PropertyNameCaseInsensitive = true,

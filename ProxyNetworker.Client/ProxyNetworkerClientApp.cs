@@ -5,6 +5,7 @@ using ProxyNetworker.Core.Platforms.Linux;
 using ProxyNetworker.Core.PortTunnels;
 using Serilog;
 using Serilog.Events;
+using ProxyNetworker.Client.Runtime;
 
 internal static class ProxyNetworkerClientApp
 {
@@ -623,7 +624,7 @@ internal static class ProxyNetworkerClientApp
             {
                 await ((VirtualNetworkTunnel)tunnel).StartAsync(cancellationToken).ConfigureAwait(false);
             }
-            Console.WriteLine($"ProxyNetworker Virtual Network client started. TUN={config.Name} {tunAddress}/{config.PrefixLength}, peer={remoteEndPoint}, encryption={(config.EncryptionEnabled ? "AES-GCM" : "HMAC-only")}.");
+            Console.WriteLine($"ProxyNetworker Virtual Network client started. TUN={tunDevice.Name} {tunAddress}/{config.PrefixLength}, peer={remoteEndPoint}, encryption={(config.EncryptionEnabled ? "AES-GCM" : "HMAC-only")}.");
             return tunnel;
         }
         catch

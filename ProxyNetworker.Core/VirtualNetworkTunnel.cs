@@ -76,6 +76,25 @@ public sealed class VirtualNetworkTunnel : IDisposable
         }
     }
 
+    /// <summary>Returns measured peer state without changing path selection or parsing logs.</summary>
+    public VirtualNetworkClientPeerSnapshot[] GetPeerSnapshots()
+    {
+        lock (_peersLock)
+        {
+            return _directPeersByAddress.Select(pair =>
+            {
+                var peer = pair.Value;
+                var path = peer.SelectedDirectPath;
+                _lastForwardingPaths.TryGetValue(pair.Key, out var selected);
+                return new VirtualNetworkClientPeerSnapshot(pair.Key,
+                    (path?.EndPoint ?? peer.ActiveEndPoint ?? _remoteEndPoint)?.ToString() ?? "",
+                    selected?.StartsWith("relay:", StringComparison.Ordinal) == true ? "relay" :
+                        selected is null ? "pending" : _meshRoutes.TryGetRoute(peer.VirtualAddress, out var route) && route.HopCount > 1 ? "mesh" : "direct",
+                    path?.EwmaRttMs);
+            }).ToArray();
+        }
+    }
+
     public async Task StartAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -88,6 +107,7 @@ public sealed class VirtualNetworkTunnel : IDisposable
         try
         {
             _udpClient = new UdpClient(_options.BindEndPoint);
+            _options.ConfigureTransportSocket?.Invoke(_udpClient.Client);
             _linuxUdpBatchSocket = LinuxUdpBatchSocket.TryCreate(
                 _udpClient.Client,
                 _options.MaxPacketSize,
@@ -472,7 +492,10 @@ public sealed class VirtualNetworkTunnel : IDisposable
             case VirtualNetworkFrameType.PathProbeAck:
                 if (VirtualNetworkPathProbe.TryParse(frame.Payload.Span, out var probeAck))
                 {
-                    RecordPathMeasurement(frame.VirtualAddress, remoteEndPoint, probeAck);
+                    if (RecordPathMeasurement(frame.VirtualAddress, remoteEndPoint, probeAck))
+                    {
+                        await PublishMeshLinkStateAfterPathChangeAsync(cancellationToken).ConfigureAwait(false);
+                    }
                 }
                 break;
 
@@ -1191,27 +1214,29 @@ public sealed class VirtualNetworkTunnel : IDisposable
         }
     }
 
-    private void RecordPathMeasurement(IPAddress virtualAddress, IPEndPoint remoteEndPoint, VirtualNetworkPathProbe probe)
+    private bool RecordPathMeasurement(IPAddress virtualAddress, IPEndPoint remoteEndPoint, VirtualNetworkPathProbe probe)
     {
         var measuredAt = DateTimeOffset.UtcNow;
         var rttMilliseconds = measuredAt.ToUnixTimeMilliseconds() - probe.TimestampMilliseconds;
         if (rttMilliseconds < 0 || rttMilliseconds > 60_000)
         {
-            return;
+            return false;
         }
 
         lock (_peersLock)
         {
             if (!_directPeersByAddress.TryGetValue(AddressKey(virtualAddress), out var state))
             {
-                return;
+                return false;
             }
 
             var isRelay = IsConfiguredServer(remoteEndPoint);
             var path = GetOrCreatePathLocked(state, remoteEndPoint, isRelay);
+            var hadConfirmedDirectPath = !isRelay && path.ProbeHistory.LastAcknowledgedAt != default;
+            var previousSelectedDirectPath = state.SelectedDirectPath;
             if (!path.ProbeHistory.TryAcknowledge(probe, measuredAt, _options.PeerTimeout))
             {
-                return;
+                return false;
             }
             var previousRtt = path.LastRttMs > 0 ? path.LastRttMs : rttMilliseconds;
             var jitterSample = Math.Abs(rttMilliseconds - previousRtt);
@@ -1226,6 +1251,24 @@ public sealed class VirtualNetworkTunnel : IDisposable
             path.Received++;
             SelectBestPathLocked(state);
             RebuildMeshRoutesLocked();
+            return !isRelay &&
+                (!hadConfirmedDirectPath || !ReferenceEquals(previousSelectedDirectPath, state.SelectedDirectPath));
+        }
+    }
+
+    private async Task PublishMeshLinkStateAfterPathChangeAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await SendMeshLinkStateAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            Log(ProxyNetworkerLogLevel.Debug, $"Could not publish an immediate Virtual Network link-state update: {ex.Message}");
         }
     }
 

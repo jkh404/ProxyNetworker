@@ -2,7 +2,7 @@
 
 项目通过 `.github/workflows/release.yml` 自动构建并发布 GitHub Release。工作流不需要额外配置 Secret，使用仓库自带的 `GITHUB_TOKEN` 上传 Release 资产。
 
-发布前会先运行核心路由和 UDP 多跳集成测试；测试失败时不会生成或覆盖 Release。
+发布前会先运行核心路由、UDP 多跳、共享运行时、UI 和发布包校验工具测试；任一必需构建或测试失败时不会生成或覆盖 Release。
 
 ## 发布步骤
 
@@ -36,9 +36,26 @@ git push origin v1.1.0-rc.1
 | `ProxyNetworker.Client_linux-x64_<tag>.tar.gz` | Linux x64 Native AOT 客户端及 `run.sh` |
 | `ProxyNetworker.Client_linux-arm64_<tag>.tar.gz` | Linux ARM64 Native AOT 客户端及 `run.sh` |
 | `ProxyNetworker.Server_linux-x64_<tag>.tar.gz` | Linux x64 自包含服务端、配置文档和 MsQuic 运行库 |
+| `ProxyNetworker.App_win-x64_preview_<tag>.zip` | Windows x64 托管自包含 GUI 与独立 Worker，开发预览 |
+| `ProxyNetworker.App_android-arm64_development-signed-preview_<tag>.apk` | Android ARM64 开发签名预览，未做手机真机验收 |
+| `ProxyNetworker.App_android-x64_development-signed-preview_<tag>.apk` | Android x64 开发签名预览，模拟器测试范围 |
 | `SHA256SUMS.txt` | 所有发布资产的 SHA256 校验值 |
 
 GitHub 还会自动附带对应标签的源码 zip 和 tar.gz。
+
+## macOS 开发预览
+
+macOS 当前使用独立的 `.github/workflows/macos-client.yml`，不加入上述正式发布资产，也不因预览 CI 成功自动发布新版本。工作流分别在 Apple Silicon 和 Intel runner 原生构建 AOT 客户端，生成完整 tar 包及 SHA256，并对解压后的程序执行加密自检和隔离 utun 回环测试。
+
+成功 run 的 `macos-evidence-osx-arm64` / `macos-evidence-osx-x64` artifact 中，`packages/` 包含预览包和 `SHA256SUMS.txt`，其余文件记录环境、源提交与自动测试结果；保留期为 14 天。使用范围、权限、签名状态和回退方式见 [macOS 客户端说明](ProxyNetworker.Client/README.macOS.md)。
+
+预览仅为 ad-hoc 签名，未做 Developer ID 签名、公证或用户 Mac 真机验收。后续正式 Mac 发行需要另行决定验收范围、签名与公证方案，不直接修改正式发布流程的资产数量来冒充平台验收。
+
+## GUI 开发预览
+
+日常 Avalonia 桌面与 Android 构建使用 `.github/workflows/client-apps.yml`；从 `v1.2.0` 起，Release 工作流也从标签的干净检出构建上述三份**预览**资产。完整 Release 共有七份安装包及一份校验文件；生成校验值后再次执行校验，任一缺失时不发布。Windows 产物为托管自包含 GUI 和独立 Worker，不是 GUI Native AOT；Android 按 x64/ARM64 分别生成开发签名 APK，不能作为正式签名或手机真机验收声明。
+
+APK 校验覆盖单一 ABI、非 Debug、版本、内嵌程序集、服务标识和已知禁止内容；双服务的权限和前台类型在合并清单阶段另行检查。Android `ApplicationVersion` 是单调递增的整数版本码，当前 `v1.2.0` 为 `10200`，后续发布时必须同步递增。临时 runner 的开发签名不保证跨构建升级，保留原始导入配置后再处理签名不一致，卸载会清除应用私有数据。正式签名和商店分发另行安排，不上传签名私钥。构建、已实测范围及后台限制见 [GUI 说明](ProxyNetworker.App/README.md)。
 
 ## 重新构建已有标签
 
@@ -55,4 +72,5 @@ GitHub 还会自动附带对应标签的源码 zip 和 tar.gz。
 - Windows x64：`windows-latest`
 - Linux x64：`ubuntu-24.04`
 - Linux ARM64：`ubuntu-24.04-arm`
-- 所有平台均使用 .NET 10 原生发布，不通过 Windows 交叉编译 Linux ARM64。
+- CLI 使用 .NET 10 Native AOT，服务端和 Windows GUI 使用托管自包含发布；Linux ARM64 CLI 在 ARM runner 上原生构建。
+- Android 使用 .NET 10 Android workload、SDK 36 与 JDK 21，最低 API 26，分别构建两个 ABI。

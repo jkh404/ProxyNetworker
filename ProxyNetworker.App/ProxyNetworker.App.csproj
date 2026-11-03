@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="12.1.4" />
+    <PackageReference Include="TKCode.Arc" Version="0.3.2-preview.2" />
+    <PackageReference Include="TKCode.Arc.Icons.Lucide" Version="0.3.2-preview.2" />
+    <PackageReference Include="TKCode.Arc.Mobile" Version="0.3.2-preview.2" />
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.0" />
+    <ProjectReference Include="../ProxyNetworker.Client.Runtime/ProxyNetworker.Client.Runtime.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <AvaloniaResource Include="Assets/Fonts/**" />
+  </ItemGroup>
+</Project>

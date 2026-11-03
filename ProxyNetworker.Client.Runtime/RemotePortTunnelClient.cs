@@ -7,7 +7,10 @@ using ProxyNetworker.Core;
 using ProxyNetworker.Core.PortTunnels;
 using ProxyNetworker.Core.PortTunnels.Remote;
 
-internal sealed class RemotePortTunnelClient : IDisposable
+namespace ProxyNetworker.Client.Runtime;
+
+/// <summary>Runs the existing authenticated TCP/UDP port tunnel protocol.</summary>
+public sealed class RemotePortTunnelClient : IDisposable
 {
     private const int BufferSize = 64 * 1024;
     private static readonly TimeSpan ReconnectDelay = TimeSpan.FromSeconds(2);
@@ -22,6 +25,18 @@ internal sealed class RemotePortTunnelClient : IDisposable
     private RemotePortTunnelConfig? _config;
     private CancellationTokenSource? _connectionCancellation;
     private int _disposed;
+    private int _ready;
+    private long _bytesSent, _bytesReceived;
+
+    public bool IsReady => Volatile.Read(ref _ready) != 0;
+
+    public RemotePortTunnelConfig? Configuration => _config;
+
+    /// <summary>Payload bytes successfully forwarded to the remote relay, excluding control frames.</summary>
+    public long BytesSent => Interlocked.Read(ref _bytesSent);
+
+    /// <summary>Payload bytes successfully delivered to the private service, excluding control frames.</summary>
+    public long BytesReceived => Interlocked.Read(ref _bytesReceived);
 
     public RemotePortTunnelClient(Uri endpoint, string token, Action<ProxyNetworkerLogEntry>? logger = null)
     {
@@ -99,6 +114,7 @@ internal sealed class RemotePortTunnelClient : IDisposable
         }
         finally
         {
+            Interlocked.Exchange(ref _ready, 0);
             DisposeActiveConnections();
             if (ReferenceEquals(_connectionCancellation, linkedCancellation))
             {
@@ -127,6 +143,7 @@ internal sealed class RemotePortTunnelClient : IDisposable
 
         _config = JsonSerializer.Deserialize(frame.GetTextPayload(), ClientJsonContext.Default.RemotePortTunnelConfig)
             ?? throw new InvalidDataException("Server tunnel configuration is invalid.");
+        Interlocked.Exchange(ref _ready, 1);
 
         Log(
             ProxyNetworkerLogLevel.Information,
@@ -265,6 +282,7 @@ internal sealed class RemotePortTunnelClient : IDisposable
         try
         {
             await tcpClient.GetStream().WriteAsync(frame.Payload, cancellationToken).ConfigureAwait(false);
+            Interlocked.Add(ref _bytesReceived, frame.Payload.Length);
         }
         catch (Exception ex) when (ex is IOException or ObjectDisposedException or SocketException)
         {
@@ -276,7 +294,8 @@ internal sealed class RemotePortTunnelClient : IDisposable
     {
         var session = await GetOrCreateUdpPrivateSessionAsync(frame.ConnectionId, cancellationToken).ConfigureAwait(false);
         session.LastSeen = DateTimeOffset.UtcNow;
-        await session.Socket.SendAsync(frame.Payload.ToArray(), frame.Payload.Length).ConfigureAwait(false);
+        var delivered = await session.Socket.SendAsync(frame.Payload.ToArray(), frame.Payload.Length).ConfigureAwait(false);
+        Interlocked.Add(ref _bytesReceived, delivered);
     }
 
     private async Task<UdpPrivateSession> GetOrCreateUdpPrivateSessionAsync(ulong connectionId, CancellationToken cancellationToken)
@@ -368,6 +387,8 @@ internal sealed class RemotePortTunnelClient : IDisposable
         try
         {
             await PortTunnelRelayWebSocket.SendAsync(socket, frame, _sendLock, cancellationToken).ConfigureAwait(false);
+            if (frame.Type is PortTunnelRelayFrameType.TcpData or PortTunnelRelayFrameType.UdpDatagram)
+                Interlocked.Add(ref _bytesSent, frame.Payload.Length);
             return true;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

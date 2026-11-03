@@ -8,6 +8,104 @@ namespace ProxyNetworker.Core.Tests;
 public sealed class VirtualNetworkTopologyTests
 {
     [Fact]
+    public async Task EmptyAdvertisementDoesNotImmediatelyRemoveConfirmedDirectEdge()
+    {
+        var key = RandomNumberGenerator.GetBytes(32);
+        var relayEndPoint = new IPEndPoint(IPAddress.Loopback, GetAvailableUdpPort());
+        var serverAddress = IPAddress.Parse("10.77.0.1");
+        var clientAAddress = IPAddress.Parse("10.77.0.5");
+        var clientBAddress = IPAddress.Parse("10.77.0.70");
+        using var relay = CreateRelay(relayEndPoint, serverAddress, key);
+        using var clientA = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+        using var clientB = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+        await relay.StartAsync();
+        await RegisterPeersAsync(clientA, clientB, relayEndPoint, clientAAddress, clientBAddress, key);
+
+        var confirmed = new VirtualNetworkMeshAdvertisement(
+            1,
+            [VirtualNetworkMeshLink.Create(clientBAddress, rttMilliseconds: 3, jitterMilliseconds: 1, lossBasisPoints: 0)],
+            DateTimeOffset.UtcNow);
+        await SendAdvertisementAsync(clientA, relayEndPoint, clientAAddress, confirmed, key);
+        await WaitForTopologyAsync(relay, snapshot => HasDirectEdge(snapshot, clientAAddress, clientBAddress));
+
+        var transientlyEmpty = new VirtualNetworkMeshAdvertisement(2, [], DateTimeOffset.UtcNow);
+        await SendAdvertisementAsync(clientA, relayEndPoint, clientAAddress, transientlyEmpty, key);
+        await Task.Delay(200);
+
+        Assert.True(HasDirectEdge(relay.GetTopologySnapshot(), clientAAddress, clientBAddress));
+    }
+
+    [Fact]
+    public async Task MovingDirectTrafficCreatesTopologyEdgeWithoutLinkAdvertisement()
+    {
+        var key = RandomNumberGenerator.GetBytes(32);
+        var relayEndPoint = new IPEndPoint(IPAddress.Loopback, GetAvailableUdpPort());
+        var serverAddress = IPAddress.Parse("10.77.0.1");
+        var clientAAddress = IPAddress.Parse("10.77.0.5");
+        var clientBAddress = IPAddress.Parse("10.77.0.70");
+        using var relay = CreateRelay(relayEndPoint, serverAddress, key);
+        using var clientA = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+        using var clientB = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+        await relay.StartAsync();
+        await RegisterPeersAsync(clientA, clientB, relayEndPoint, clientAAddress, clientBAddress, key);
+
+        await SendTrafficReportAsync(
+            clientA,
+            relayEndPoint,
+            clientAAddress,
+            new VirtualNetworkMeshTrafficReport(1, [new VirtualNetworkMeshTraffic(clientBAddress, 1024, 2048)]),
+            key);
+        await Task.Delay(250);
+        await SendTrafficReportAsync(
+            clientA,
+            relayEndPoint,
+            clientAAddress,
+            new VirtualNetworkMeshTrafficReport(2, [new VirtualNetworkMeshTraffic(clientBAddress, 4096, 8192)]),
+            key);
+
+        var topology = await WaitForTopologyAsync(
+            relay,
+            snapshot => snapshot.Edges.Any(edge =>
+                edge.ConnectionType == VirtualNetworkTopologyConnectionTypes.Direct &&
+                edge.SourceAddress.Equals(clientAAddress) &&
+                edge.DestinationAddress.Equals(clientBAddress) &&
+                edge.BytesPerSecondSent > 0));
+        var directEdge = Assert.Single(topology.Edges, edge =>
+            edge.ConnectionType == VirtualNetworkTopologyConnectionTypes.Direct &&
+            edge.SourceAddress.Equals(clientAAddress) &&
+            edge.DestinationAddress.Equals(clientBAddress));
+        Assert.Null(directEdge.RttMilliseconds);
+        Assert.True(directEdge.BytesPerSecondSent > 0);
+        Assert.True(directEdge.BytesPerSecondReceived > 0);
+    }
+
+    [Fact]
+    public async Task ConfirmedDirectEdgeExpiresWithoutFreshTelemetry()
+    {
+        var key = RandomNumberGenerator.GetBytes(32);
+        var relayEndPoint = new IPEndPoint(IPAddress.Loopback, GetAvailableUdpPort());
+        var serverAddress = IPAddress.Parse("10.77.0.1");
+        var clientAAddress = IPAddress.Parse("10.77.0.5");
+        var clientBAddress = IPAddress.Parse("10.77.0.70");
+        using var relay = CreateRelay(relayEndPoint, serverAddress, key, TimeSpan.FromSeconds(2));
+        using var clientA = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+        using var clientB = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+        await relay.StartAsync();
+        await RegisterPeersAsync(clientA, clientB, relayEndPoint, clientAAddress, clientBAddress, key);
+
+        var advertisement = new VirtualNetworkMeshAdvertisement(
+            1,
+            [VirtualNetworkMeshLink.Create(clientBAddress, rttMilliseconds: 3, jitterMilliseconds: 1, lossBasisPoints: 0)],
+            DateTimeOffset.UtcNow);
+        await SendAdvertisementAsync(clientA, relayEndPoint, clientAAddress, advertisement, key);
+        await WaitForTopologyAsync(relay, snapshot => HasDirectEdge(snapshot, clientAAddress, clientBAddress));
+
+        await Task.Delay(2300);
+
+        Assert.False(HasDirectEdge(relay.GetTopologySnapshot(), clientAAddress, clientBAddress));
+    }
+
+    [Fact]
     public async Task RelaySnapshotIncludesServerRelayAndDirectTraffic()
     {
         var key = RandomNumberGenerator.GetBytes(32);
@@ -127,6 +225,76 @@ public sealed class VirtualNetworkTopologyTests
     {
         await client.SendAsync(frame, frame.Length, endPoint);
     }
+
+    private static VirtualNetworkRelay CreateRelay(
+        IPEndPoint relayEndPoint,
+        IPAddress serverAddress,
+        byte[] key,
+        TimeSpan? peerTimeout = null) =>
+        new(new VirtualNetworkTunnelOptions
+        {
+            BindEndPoint = relayEndPoint,
+            NodeAddress = serverAddress,
+            PrefixLength = 24,
+            NodeName = "test-server",
+            AuthenticationKey = key,
+            HeartbeatInterval = TimeSpan.FromSeconds(1),
+            PeerTimeout = peerTimeout ?? TimeSpan.FromSeconds(20)
+        });
+
+    private static async Task RegisterPeersAsync(
+        UdpClient clientA,
+        UdpClient clientB,
+        IPEndPoint relayEndPoint,
+        IPAddress clientAAddress,
+        IPAddress clientBAddress,
+        byte[] key)
+    {
+        await SendAsync(clientA, relayEndPoint, VirtualNetworkFrame.Create(
+            VirtualNetworkFrameType.Hello,
+            clientAAddress,
+            VirtualNetworkNodeInfo.FromEnvironment("client-a").Encode(),
+            key));
+        await SendAsync(clientB, relayEndPoint, VirtualNetworkFrame.Create(
+            VirtualNetworkFrameType.Hello,
+            clientBAddress,
+            VirtualNetworkNodeInfo.FromEnvironment("client-b").Encode(),
+            key));
+        await Task.Delay(100);
+    }
+
+    private static Task SendAdvertisementAsync(
+        UdpClient client,
+        IPEndPoint relayEndPoint,
+        IPAddress sourceAddress,
+        VirtualNetworkMeshAdvertisement advertisement,
+        byte[] key) =>
+        SendAsync(client, relayEndPoint, VirtualNetworkFrame.Create(
+            VirtualNetworkFrameType.MeshLinkState,
+            sourceAddress,
+            advertisement.Encode(),
+            key));
+
+    private static Task SendTrafficReportAsync(
+        UdpClient client,
+        IPEndPoint relayEndPoint,
+        IPAddress sourceAddress,
+        VirtualNetworkMeshTrafficReport report,
+        byte[] key) =>
+        SendAsync(client, relayEndPoint, VirtualNetworkFrame.Create(
+            VirtualNetworkFrameType.MeshTrafficReport,
+            sourceAddress,
+            report.Encode(),
+            key));
+
+    private static bool HasDirectEdge(
+        VirtualNetworkTopologySnapshot snapshot,
+        IPAddress sourceAddress,
+        IPAddress destinationAddress) =>
+        snapshot.Edges.Any(edge =>
+            edge.ConnectionType == VirtualNetworkTopologyConnectionTypes.Direct &&
+            edge.SourceAddress.Equals(sourceAddress) &&
+            edge.DestinationAddress.Equals(destinationAddress));
 
     private static byte[] CreateIPv4Packet(IPAddress source, IPAddress destination, int payloadLength)
     {

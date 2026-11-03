@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Sockets;
 
 namespace ProxyNetworker.Core;
 
@@ -37,6 +38,12 @@ public class VirtualNetworkTunnelOptions
     public IReadOnlyCollection<IPAddress> AllowedDirectCandidateAddresses { get; set; } = Array.Empty<IPAddress>();
 
     public bool IncludeLocalInterfaceCandidates { get; set; } = true;
+
+    /// <summary>
+    /// Gets or sets a startup-only callback applied before any transport traffic.
+    /// Android hosts use this to protect the outer socket from their VPN.
+    /// </summary>
+    public Action<Socket>? ConfigureTransportSocket { get; set; }
 
     public int MaxPacketSize { get; set; } = 65535;
 

@@ -103,6 +103,25 @@ public sealed class VirtualNetworkTunnelHotPathTests
         Assert.Null(GetField(tunnel, "_cachedForwardingDecision"));
     }
 
+    [Fact]
+    public void FirstConfirmedDirectProbeRequestsImmediateTopologyPublish()
+    {
+        using var tunnel = CreateTunnel();
+        var address = IPAddress.Parse("10.66.0.2");
+        var endpoint = new IPEndPoint(IPAddress.Parse("192.0.2.2"), 13302);
+        Invoke(tunnel, "UpdateDirectCandidates", address, new[] { endpoint });
+
+        var firstProbe = new VirtualNetworkPathProbe(address, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - 1, 1);
+        QueueProbe(tunnel, address, endpoint, firstProbe);
+        var first = (bool)Invoke(tunnel, "RecordPathMeasurement", address, endpoint, firstProbe)!;
+        var secondProbe = new VirtualNetworkPathProbe(address, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - 1, 2);
+        QueueProbe(tunnel, address, endpoint, secondProbe);
+        var second = (bool)Invoke(tunnel, "RecordPathMeasurement", address, endpoint, secondProbe)!;
+
+        Assert.True(first);
+        Assert.False(second);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -218,6 +237,21 @@ public sealed class VirtualNetworkTunnelHotPathTests
 
     private static void SetField(VirtualNetworkTunnel tunnel, string name, object value) =>
         typeof(VirtualNetworkTunnel).GetField(name, PrivateInstance)!.SetValue(tunnel, value);
+
+    private static void QueueProbe(
+        VirtualNetworkTunnel tunnel,
+        IPAddress address,
+        IPEndPoint endpoint,
+        VirtualNetworkPathProbe probe)
+    {
+        var peers = (IDictionary)GetField(tunnel, "_directPeersByAddress")!;
+        var state = peers[address.ToString()]!;
+        var paths = (IDictionary)state.GetType().GetProperty("Paths")!.GetValue(state)!;
+        var path = paths[endpoint.ToString()]!;
+        var history = path.GetType().GetProperty("ProbeHistory")!.GetValue(path)!;
+        history.GetType().GetMethod("RecordSent", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(history, new object[] { probe, DateTimeOffset.UtcNow, TimeSpan.FromSeconds(20) });
+    }
 
     private static VirtualNetworkMeshRouteTable GetRoutes(VirtualNetworkTunnel tunnel) =>
         (VirtualNetworkMeshRouteTable)GetField(tunnel, "_meshRoutes")!;

@@ -23,19 +23,26 @@ internal sealed class TokenSingleInstanceLock : IDisposable
         var path = GetLockFilePath(token);
         try
         {
-            var stream = new FileStream(
-                path,
-                FileMode.OpenOrCreate,
-                FileAccess.ReadWrite,
-                FileShare.None,
-                bufferSize: 1024,
-                FileOptions.WriteThrough);
+            FileStream stream;
             try
             {
-                var metadata = Encoding.UTF8.GetBytes($"pid={Environment.ProcessId}\n");
-                stream.SetLength(0);
-                stream.Write(metadata);
-                stream.Flush(flushToDisk: true);
+                stream = new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite,
+                    FileShare.None, bufferSize: 1024, FileOptions.WriteThrough);
+            }
+            catch (UnauthorizedAccessException) when (File.Exists(path))
+            {
+                // Elevated clients can leave read-only ACLs. Exclusivity does not require updating PID metadata.
+                stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None);
+            }
+            try
+            {
+                if (stream.CanWrite)
+                {
+                    var metadata = Encoding.UTF8.GetBytes($"pid={Environment.ProcessId}\n");
+                    stream.SetLength(0);
+                    stream.Write(metadata);
+                    stream.Flush(flushToDisk: true);
+                }
                 return new TokenSingleInstanceLock(stream);
             }
             catch

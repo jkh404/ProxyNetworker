@@ -15,6 +15,7 @@ public sealed class VirtualNetworkRelay : IVirtualNetworkRelay
     private readonly Dictionary<string, string> _addressByEndpoint = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, MeshAdvertisementObservation> _meshAdvertisements = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, MeshTrafficObservation> _meshTrafficReports = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, TopologyDirectLinkObservation> _topologyDirectLinks = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _bannedAddresses = new(StringComparer.OrdinalIgnoreCase);
     private UdpClient? _udpClient;
     private LinuxUdpBatchSocket? _linuxUdpBatchSocket;
@@ -57,6 +58,7 @@ public sealed class VirtualNetworkRelay : IVirtualNetworkRelay
                     _addressByEndpoint.Remove(EndPointKey(peer.EndPoint));
                     _meshAdvertisements.Remove(key);
                     _meshTrafficReports.Remove(key);
+                    RemoveTopologyDirectLinksLocked(key);
                 }
             }
             else
@@ -126,51 +128,31 @@ public sealed class VirtualNetworkRelay : IVirtualNetworkRelay
             var onlineAddresses = _peersByAddress.Values
                 .Select(static peer => peer.VirtualAddress.ToString())
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
-            var observedDirectLinks = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var observation in _meshAdvertisements.Values
-                .Where(item => capturedAt - item.ObservedAt <= _options.PeerTimeout)
-                .OrderByDescending(static item => item.ObservedAt))
+            foreach (var observation in _topologyDirectLinks.Values
+                .Where(item => capturedAt - item.LastObservedAt <= _options.PeerTimeout)
+                .OrderByDescending(static item => item.LastObservedAt))
             {
-                VirtualNetworkMeshTrafficReport? trafficReport = null;
-                if (_meshTrafficReports.TryGetValue(AddressKey(observation.Origin), out var trafficObservation) &&
-                    capturedAt - trafficObservation.ObservedAt <= _options.PeerTimeout)
+                if (!onlineAddresses.Contains(observation.SourceAddress.ToString()) ||
+                    !onlineAddresses.Contains(observation.DestinationAddress.ToString()))
                 {
-                    trafficReport = trafficObservation.Telemetry;
+                    continue;
                 }
 
-                foreach (var link in observation.Advertisement.Links)
-                {
-                    if (!onlineAddresses.Contains(link.VirtualAddress.ToString()))
-                    {
-                        continue;
-                    }
-
-                    var pairKey = string.Compare(observation.Origin.ToString(), link.VirtualAddress.ToString(), StringComparison.OrdinalIgnoreCase) < 0
-                        ? $"{observation.Origin}|{link.VirtualAddress}"
-                        : $"{link.VirtualAddress}|{observation.Origin}";
-                    if (!observedDirectLinks.Add(pairKey))
-                    {
-                        continue;
-                    }
-
-                    var traffic = trafficReport?.Links.FirstOrDefault(
-                        item => item.VirtualAddress.Equals(link.VirtualAddress));
-                    var trafficRate = trafficObservation?.Rates.GetValueOrDefault(AddressKey(link.VirtualAddress));
-                    edges.Add(new VirtualNetworkTopologyEdgeSnapshot(
-                        observation.Origin,
-                        link.VirtualAddress,
-                        VirtualNetworkTopologyConnectionTypes.Direct,
-                        VirtualNetworkTransportProtocols.Udp,
-                        link.RttMilliseconds,
-                        link.JitterMilliseconds,
-                        link.LossBasisPoints / 100d,
-                        link.CostMilliseconds,
-                        traffic?.BytesSent ?? 0,
-                        traffic?.BytesReceived ?? 0,
-                        trafficRate?.BytesSent ?? 0,
-                        trafficRate?.BytesReceived ?? 0,
-                        observation.ObservedAt));
-                }
+                var traffic = GetTopologyTrafficLocked(observation.SourceAddress, observation.DestinationAddress, capturedAt);
+                edges.Add(new VirtualNetworkTopologyEdgeSnapshot(
+                    observation.SourceAddress,
+                    observation.DestinationAddress,
+                    VirtualNetworkTopologyConnectionTypes.Direct,
+                    VirtualNetworkTransportProtocols.Udp,
+                    observation.RttMilliseconds,
+                    observation.JitterMilliseconds,
+                    observation.LossPercent,
+                    observation.CostMilliseconds,
+                    traffic?.BytesSent ?? 0,
+                    traffic?.BytesReceived ?? 0,
+                    traffic?.BytesPerSecondSent ?? 0,
+                    traffic?.BytesPerSecondReceived ?? 0,
+                    observation.LastObservedAt));
             }
         }
 
@@ -412,10 +394,15 @@ public sealed class VirtualNetworkRelay : IVirtualNetworkRelay
                         if (!_meshAdvertisements.TryGetValue(key, out var existing) ||
                             existing.Advertisement.Sequence < advertisement.Sequence)
                         {
+                            var observedAt = DateTimeOffset.UtcNow;
                             _meshAdvertisements[key] = new MeshAdvertisementObservation(
                                 frame.VirtualAddress,
                                 advertisement,
-                                DateTimeOffset.UtcNow);
+                                observedAt);
+                            foreach (var link in advertisement.Links)
+                            {
+                                UpdateTopologyDirectLinkLocked(frame.VirtualAddress, link, observedAt);
+                            }
                         }
                     }
                     await BroadcastMeshFrameAsync(frame, remoteEndPoint, cancellationToken).ConfigureAwait(false);
@@ -453,6 +440,14 @@ public sealed class VirtualNetworkRelay : IVirtualNetworkRelay
                                 trafficReport,
                                 observedAt,
                                 rates);
+                            foreach (var link in trafficReport.Links)
+                            {
+                                var rate = rates.GetValueOrDefault(AddressKey(link.VirtualAddress));
+                                if (rate is not null && rate.BytesSent + rate.BytesReceived > 0)
+                                {
+                                    UpdateTopologyDirectTrafficLocked(frame.VirtualAddress, link.VirtualAddress, observedAt);
+                                }
+                            }
                         }
                     }
                 }
@@ -738,6 +733,7 @@ public sealed class VirtualNetworkRelay : IVirtualNetworkRelay
                 _peersByAddress.Remove(oldAddressKey);
                 _meshAdvertisements.Remove(oldAddressKey);
                 _meshTrafficReports.Remove(oldAddressKey);
+                RemoveTopologyDirectLinksLocked(oldAddressKey);
             }
 
             _addressByEndpoint[endpointKey] = addressKey;
@@ -788,6 +784,7 @@ public sealed class VirtualNetworkRelay : IVirtualNetworkRelay
                 _peersByAddress.Remove(key);
                 _meshAdvertisements.Remove(key);
                 _meshTrafficReports.Remove(key);
+                RemoveTopologyDirectLinksLocked(key);
                 Log(ProxyNetworkerLogLevel.Information, $"Virtual Network peer {peer.VirtualAddress} expired.");
             }
         }
@@ -853,6 +850,120 @@ public sealed class VirtualNetworkRelay : IVirtualNetworkRelay
     private static bool EndPointEquals(IPEndPoint left, IPEndPoint right)
     {
         return left.Port == right.Port && left.Address.Equals(right.Address);
+    }
+
+    private void UpdateTopologyDirectLinkLocked(
+        IPAddress sourceAddress,
+        VirtualNetworkMeshLink link,
+        DateTimeOffset observedAt)
+    {
+        if (sourceAddress.Equals(link.VirtualAddress))
+        {
+            return;
+        }
+
+        var key = TopologyDirectLinkKey(sourceAddress, link.VirtualAddress);
+        var lastTrafficAt = _topologyDirectLinks.TryGetValue(key, out var existing)
+            ? existing.LastTrafficAt
+            : default;
+        _topologyDirectLinks[key] = new TopologyDirectLinkObservation(
+            sourceAddress,
+            link.VirtualAddress,
+            link.RttMilliseconds,
+            link.JitterMilliseconds,
+            link.LossBasisPoints / 100d,
+            link.CostMilliseconds,
+            observedAt,
+            lastTrafficAt);
+    }
+
+    private void UpdateTopologyDirectTrafficLocked(
+        IPAddress sourceAddress,
+        IPAddress destinationAddress,
+        DateTimeOffset observedAt)
+    {
+        if (sourceAddress.Equals(destinationAddress))
+        {
+            return;
+        }
+
+        var key = TopologyDirectLinkKey(sourceAddress, destinationAddress);
+        if (_topologyDirectLinks.TryGetValue(key, out var existing))
+        {
+            _topologyDirectLinks[key] = existing with { LastTrafficAt = observedAt };
+            return;
+        }
+
+        _topologyDirectLinks[key] = new TopologyDirectLinkObservation(
+            sourceAddress,
+            destinationAddress,
+            null,
+            null,
+            null,
+            null,
+            default,
+            observedAt);
+    }
+
+    private TopologyTrafficObservation? GetTopologyTrafficLocked(
+        IPAddress sourceAddress,
+        IPAddress destinationAddress,
+        DateTimeOffset capturedAt)
+    {
+        if (_meshTrafficReports.TryGetValue(AddressKey(sourceAddress), out var sourceObservation) &&
+            capturedAt - sourceObservation.ObservedAt <= _options.PeerTimeout)
+        {
+            var sourceTraffic = sourceObservation.Telemetry.Links.FirstOrDefault(
+                item => item.VirtualAddress.Equals(destinationAddress));
+            if (sourceTraffic is not null)
+            {
+                var rate = sourceObservation.Rates.GetValueOrDefault(AddressKey(destinationAddress));
+                return new TopologyTrafficObservation(
+                    sourceTraffic.BytesSent,
+                    sourceTraffic.BytesReceived,
+                    rate?.BytesSent ?? 0,
+                    rate?.BytesReceived ?? 0);
+            }
+        }
+
+        if (_meshTrafficReports.TryGetValue(AddressKey(destinationAddress), out var destinationObservation) &&
+            capturedAt - destinationObservation.ObservedAt <= _options.PeerTimeout)
+        {
+            var destinationTraffic = destinationObservation.Telemetry.Links.FirstOrDefault(
+                item => item.VirtualAddress.Equals(sourceAddress));
+            if (destinationTraffic is not null)
+            {
+                var rate = destinationObservation.Rates.GetValueOrDefault(AddressKey(sourceAddress));
+                return new TopologyTrafficObservation(
+                    destinationTraffic.BytesReceived,
+                    destinationTraffic.BytesSent,
+                    rate?.BytesReceived ?? 0,
+                    rate?.BytesSent ?? 0);
+            }
+        }
+
+        return null;
+    }
+
+    private void RemoveTopologyDirectLinksLocked(string addressKey)
+    {
+        foreach (var key in _topologyDirectLinks
+            .Where(item => AddressKey(item.Value.SourceAddress).Equals(addressKey, StringComparison.OrdinalIgnoreCase) ||
+                AddressKey(item.Value.DestinationAddress).Equals(addressKey, StringComparison.OrdinalIgnoreCase))
+            .Select(static item => item.Key)
+            .ToArray())
+        {
+            _topologyDirectLinks.Remove(key);
+        }
+    }
+
+    private static string TopologyDirectLinkKey(IPAddress first, IPAddress second)
+    {
+        var firstKey = AddressKey(first);
+        var secondKey = AddressKey(second);
+        return string.Compare(firstKey, secondKey, StringComparison.OrdinalIgnoreCase) <= 0
+            ? $"{firstKey}|{secondKey}"
+            : $"{secondKey}|{firstKey}";
     }
 
     private static string AddressKey(IPAddress address)
@@ -1020,4 +1131,23 @@ public sealed class VirtualNetworkRelay : IVirtualNetworkRelay
         IReadOnlyDictionary<string, MeshTrafficRate> Rates);
 
     private sealed record MeshTrafficRate(double BytesSent, double BytesReceived);
+
+    private sealed record TopologyTrafficObservation(
+        long BytesSent,
+        long BytesReceived,
+        double BytesPerSecondSent,
+        double BytesPerSecondReceived);
+
+    private sealed record TopologyDirectLinkObservation(
+        IPAddress SourceAddress,
+        IPAddress DestinationAddress,
+        int? RttMilliseconds,
+        int? JitterMilliseconds,
+        double? LossPercent,
+        int? CostMilliseconds,
+        DateTimeOffset LastLinkStateAt,
+        DateTimeOffset LastTrafficAt)
+    {
+        public DateTimeOffset LastObservedAt => LastTrafficAt > LastLinkStateAt ? LastTrafficAt : LastLinkStateAt;
+    }
 }

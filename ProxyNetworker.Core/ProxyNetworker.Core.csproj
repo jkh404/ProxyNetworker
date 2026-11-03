@@ -19,7 +19,27 @@
   <ItemGroup>
     <InternalsVisibleTo Include="ProxyNetworker.Core.Tests" />
     <InternalsVisibleTo Include="ProxyNetworker.Client" />
+    <InternalsVisibleTo Include="ProxyNetworker.Client.Runtime" />
   </ItemGroup>
+
+  <PropertyGroup Condition="$([MSBuild]::IsOSPlatform('OSX'))">
+    <MacOsUtunShimPath>$(BaseIntermediateOutputPath)$(Configuration)/$(TargetFramework)/$(RuntimeIdentifier)/native/libproxynetworker-utun.dylib</MacOsUtunShimPath>
+    <MacOsUtunArchitecture Condition="'$(RuntimeIdentifier)' == 'osx-arm64'">-arch arm64</MacOsUtunArchitecture>
+    <MacOsUtunArchitecture Condition="'$(RuntimeIdentifier)' == 'osx-x64'">-arch x86_64</MacOsUtunArchitecture>
+  </PropertyGroup>
+
+  <ItemGroup Condition="$([MSBuild]::IsOSPlatform('OSX'))">
+    <None Include="$(MacOsUtunShimPath)" Link="libproxynetworker-utun.dylib"
+          CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <Target Name="BuildMacOsUtunShim" BeforeTargets="CoreCompile"
+          Condition="$([MSBuild]::IsOSPlatform('OSX')) And '$(TargetFramework)' != ''"
+          Inputs="$(MSBuildProjectDirectory)/Platforms/MacOS/native/utun_shim.c"
+          Outputs="$(MacOsUtunShimPath)">
+    <MakeDir Directories="$([System.IO.Path]::GetDirectoryName('$(MacOsUtunShimPath)'))" />
+    <Exec Command="xcrun clang -std=c11 -dynamiclib -fvisibility=hidden -Wall -Wextra -Werror -O2 -mmacosx-version-min=14.0 $(MacOsUtunArchitecture) &quot;$(MSBuildProjectDirectory)/Platforms/MacOS/native/utun_shim.c&quot; -Wl,-install_name,@rpath/libproxynetworker-utun.dylib -o &quot;$(MacOsUtunShimPath)&quot;" />
+  </Target>
 
   <ItemGroup Condition="'$(RuntimeIdentifier)' == 'linux-x64'">
     <None Include="$(NuGetPackageRoot)stirlinglabs.msquic.bindings.runtime.linux-x64.openssl/2.2.2/runtimes/linux-x64/native/libmsquic-openssl.so"

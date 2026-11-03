@@ -1,0 +1,30 @@
+<Application xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:arc="https://github.com/AIDotNet/TKCode.Arc"
+             x:Class="ProxyNetworker.App.App">
+  <Application.Resources>
+    <!-- Arc spacing tokens are doubles; padding and margin require typed Thickness resources. -->
+    <Thickness x:Key="PageInset">16</Thickness>
+    <Thickness x:Key="ItemInset">8</Thickness>
+  </Application.Resources>
+  <Application.Styles>
+    <Style Selector="TextBlock">
+      <Setter Property="FontSize" Value="{arc:ArcDesignTokenResource TypeSM}" />
+      <Setter Property="LineHeight" Value="NaN" />
+    </Style>
+    <Style Selector="TextBlock.muted">
+      <Setter Property="Foreground" Value="{arc:ArcDesignTokenResource TextSecondary}" />
+      <Setter Property="FontSize" Value="{arc:ArcDesignTokenResource TypeXS}" />
+    </Style>
+    <Style Selector="TextBlock.label">
+      <Setter Property="FontSize" Value="{arc:ArcDesignTokenResource TypeXS}" />
+      <Setter Property="Foreground" Value="{arc:ArcDesignTokenResource TextSecondary}" />
+      <Setter Property="Margin" Value="0,0,0,8" />
+    </Style>
+    <Style Selector="arc|Button.icon">
+      <Setter Property="Width" Value="{arc:ArcDesignTokenResource ControlSizeMD}" />
+      <Setter Property="Height" Value="{arc:ArcDesignTokenResource ControlSizeMD}" />
+      <Setter Property="Padding" Value="{DynamicResource ItemInset}" />
+    </Style>
+  </Application.Styles>
+</Application>

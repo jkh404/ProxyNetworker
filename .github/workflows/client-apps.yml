@@ -1,0 +1,93 @@
+name: Client apps
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: client-apps-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_VERSION: '10.0.x'
+  DOTNET_NOLOGO: 'true'
+  DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+
+jobs:
+  windows:
+    name: Windows desktop package
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+      - name: Test client runtime and UI
+        shell: pwsh
+        run: |
+          dotnet test ProxyNetworker.Client.Runtime.Tests/ProxyNetworker.Client.Runtime.Tests.csproj -c Release
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          dotnet test ProxyNetworker.App.Tests/ProxyNetworker.App.Tests.csproj -c Release
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Publish desktop and worker
+        run: dotnet publish ProxyNetworker.App.Desktop/ProxyNetworker.App.Desktop.csproj -c Release -r win-x64 --self-contained true -o artifacts/desktop-win-x64
+      - name: Test Android UI and recovery tool contracts
+        shell: pwsh
+        run: |
+          ./tools/tests/Test-AndroidUiDumpContract.ps1
+          ./tools/tests/Test-AndroidRecoveryContract.ps1
+      - name: Verify release package boundaries
+        shell: pwsh
+        run: |
+          $root = Join-Path $PWD 'artifacts/desktop-win-x64'
+          foreach ($file in @('ProxyNetworker.App.Desktop.exe', 'worker/ProxyNetworker.Worker.exe', 'worker/wintun.dll')) {
+            if (!(Test-Path (Join-Path $root $file))) { throw "Missing $file" }
+          }
+          if (Get-ChildItem $root -Recurse -Filter '*Spyglass*') { throw 'Spyglass must not ship in Release.' }
+          if (Get-ChildItem $root -Recurse -Filter 'appsettings*.json') { throw 'Do not bundle machine-local client settings.' }
+      - uses: actions/upload-artifact@v7
+        with:
+          name: desktop-win-x64-preview
+          path: artifacts/desktop-win-x64
+
+  android:
+    name: Android ${{ matrix.rid }} package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        rid: [android-arm64, android-x64]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+      - name: Install Android workload and platform
+        run: |
+          dotnet workload install android --skip-manifest-update
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;36.0.0"
+      - name: Publish standalone APK
+        run: |
+          dotnet publish ProxyNetworker.App.Android/ProxyNetworker.App.Android.csproj \
+            -c Release -r "${{ matrix.rid }}" \
+            -p:RuntimeIdentifiers="${{ matrix.rid }}" \
+            -p:JavaSdkDirectory="$JAVA_HOME_21_X64" \
+            -p:AndroidSdkDirectory="$ANDROID_HOME" \
+            -o "artifacts/${{ matrix.rid }}"
+      - name: Verify package boundaries and ABI
+        env:
+          RID: ${{ matrix.rid }}
+        run: |
+          version="$(dotnet msbuild ProxyNetworker.App.Android/ProxyNetworker.App.Android.csproj -getProperty:ApplicationDisplayVersion)"
+          python3 tools/Verify-AndroidPackage.py "artifacts/$RID" "$RID" "$version"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.rid }}-development-signed-preview
+          path: artifacts/${{ matrix.rid }}/*Signed.apk
